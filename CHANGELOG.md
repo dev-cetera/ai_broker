@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.0
+## 0.2.0
 
 Initial release. `AiBroker` interface (`listModels`, `complete`, `chat`,
 `stream`) with three implementations: `OpenAiBroker`, `AnthropicBroker`,
