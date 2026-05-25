@@ -17,8 +17,6 @@ Provider-agnostic Dart abstraction over Claude, OpenAI, and Gemini. One
 interface for listing models, single-shot completions, multi-turn chat,
 and token streaming.
 
-Internal to the `dev_cetera` workspace — not on pub.dev.
-
 ## Why
 
 Several apps in this workspace (`powerdb`, `chitbot`, `heylang`,
