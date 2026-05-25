@@ -1,0 +1,11 @@
+name: ai_broker_example
+homepage: https://dev-cetera.com/
+publish_to: none
+version: 0.1.0
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+dependencies:
+  ai_broker:
+    path: ..
+dev_dependencies:
+  lints: ^6.0.0
