@@ -133,8 +133,8 @@ class OpenAiBroker implements AiBroker {
       final json = jsonDecode(data) as Map<String, Object?>;
       final choices = json['choices'] as List<Object?>? ?? const [];
       if (choices.isEmpty) continue;
-      final delta =
-          (choices.first as Map<String, Object?>)['delta'] as Map<String, Object?>?;
+      final delta = (choices.first as Map<String, Object?>)['delta']
+          as Map<String, Object?>?;
       final content = delta?['content'] as String?;
       if (content != null && content.isNotEmpty) yield content;
     }

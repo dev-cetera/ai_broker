@@ -46,8 +46,7 @@ class GeminiBroker implements AiBroker {
         'pageSize': '50',
         if (pageToken != null) 'pageToken': pageToken,
       };
-      final uri =
-          Uri.parse('$_baseUrl/models').replace(queryParameters: query);
+      final uri = Uri.parse('$_baseUrl/models').replace(queryParameters: query);
       final res = await _http.get(uri).timeout(_timeout);
       if (res.statusCode >= 400) return const [];
       final body = jsonDecode(res.body) as Map<String, Object?>;

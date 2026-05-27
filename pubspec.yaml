@@ -13,16 +13,16 @@
 
 name: ai_broker
 homepage: https://dev-cetera.com/
-repository: https://github.com/robmllze/df_packages
+repository: https://github.com/dev-cetera/ai_broker
 funding:
-  - https://www.buymeacoffee.com/dev_cetera
-  - https://www.patreon.com/c/robelator
+  - https://buymeacoffee.com/dev_cetera
+  - https://www.patreon.com/robelator
   - https://github.com/sponsors/robelator
 description: >-
   Provider-agnostic Dart abstraction over Claude, OpenAI, and Gemini.
   One interface for listing models, completions, multi-turn chat, and
   streaming responses.
-version: 0.2.0
+version: 0.2.1
 topics:
   - ai
   - llm
