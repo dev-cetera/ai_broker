@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- feat: `stripCodeFence` helper for stripping leading/trailing markdown code
+  fences from model output, exported from the package barrel.
+
 ## 0.2.0
 
 Initial release. `AiBroker` interface (`listModels`, `complete`, `chat`,
