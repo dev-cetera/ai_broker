@@ -44,13 +44,15 @@ void main() {
       expect(stripCodeFence(input), 'use ```code``` like this');
     });
 
-    test('returns input unchanged when there is an opening fence but no '
+    test(
+        'returns input unchanged when there is an opening fence but no '
         'newline', () {
       const input = '```dart void main() {}```';
       expect(stripCodeFence(input), input);
     });
 
-    test('removes only the opening fence when the closing fence is missing', () {
+    test('removes only the opening fence when the closing fence is missing',
+        () {
       const input = '```dart\nvoid main() {}';
       expect(stripCodeFence(input), 'void main() {}');
     });

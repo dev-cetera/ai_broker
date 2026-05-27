@@ -87,8 +87,7 @@ void main() {
     });
 
     test('unregister removes the broker', () {
-      AiBrokerRegistry.instance
-          .register(_StubBroker('openai', 'OpenAI'));
+      AiBrokerRegistry.instance.register(_StubBroker('openai', 'OpenAI'));
       AiBrokerRegistry.instance.unregister('openai');
       expect(AiBrokerRegistry.instance.lookup('openai'), isNull);
     });

@@ -125,7 +125,8 @@ void main() {
     });
 
     group('chat', () {
-      test('puts key in query, system in systemInstruction, and reads '
+      test(
+          'puts key in query, system in systemInstruction, and reads '
           'candidates[].content.parts[].text', () async {
         late Map<String, Object?> sentBody;
         late Uri sentUri;
@@ -198,8 +199,7 @@ void main() {
         );
       });
 
-      test('omits systemInstruction when the system prompt is empty',
-          () async {
+      test('omits systemInstruction when the system prompt is empty', () async {
         late Map<String, Object?> sentBody;
         final b = GeminiBroker(
           client: MockClient((req) async {

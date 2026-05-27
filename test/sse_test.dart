@@ -93,10 +93,8 @@ void main() {
       expect(events, isEmpty);
     });
 
-    test('produces an event with empty data when only event: is set',
-        () async {
-      final events =
-          await decodeSseStream(_src('event: ping\n\n')).toList();
+    test('produces an event with empty data when only event: is set', () async {
+      final events = await decodeSseStream(_src('event: ping\n\n')).toList();
       expect(events.single.event, 'ping');
       expect(events.single.data, '');
     });
