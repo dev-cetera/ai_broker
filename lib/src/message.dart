@@ -55,7 +55,14 @@ class ChatRequest {
     required this.messages,
     this.temperature = 0.3,
     this.maxTokens = 2048,
-  });
+  })  : assert(
+          maxTokens > 0,
+          'ChatRequest.maxTokens must be positive.',
+        ),
+        assert(
+          temperature >= 0.0 && temperature <= 2.0,
+          'ChatRequest.temperature must be in [0.0, 2.0].',
+        );
 
   /// Convenience for the single-shot case.
   factory ChatRequest.single({

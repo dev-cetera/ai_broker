@@ -15,11 +15,12 @@
 // `import '/_common.dart';`. Bundle third-party APIs the package uses
 // here so individual sources don't repeat the same imports.
 
-export 'dart:async' show StreamController;
+export 'dart:async' show StreamController, StreamSubscription;
 export 'dart:convert' show jsonDecode, jsonEncode, utf8, LineSplitter;
 export 'dart:io' show Platform;
 
-export 'package:http/http.dart' show Client, Request, Response;
+export 'package:http/http.dart'
+    show Client, Request, Response, StreamedResponse;
 export 'package:meta/meta.dart' show immutable, visibleForTesting;
 
 export 'src/_src.g.dart';

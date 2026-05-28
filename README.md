@@ -1,5 +1,5 @@
 [![pub](https://img.shields.io/pub/v/ai_broker.svg)](https://pub.dev/packages/ai_broker)
-[![tag](https://img.shields.io/badge/Tag-v0.2.0-purple?logo=github)](https://github.com/dev-cetera/ai_broker/tree/v0.2.0)
+[![tag](https://img.shields.io/badge/Tag-v0.2.2-purple?logo=github)](https://github.com/dev-cetera/ai_broker/tree/v0.2.2)
 [![buymeacoffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/dev_cetera)
 [![sponsor](https://img.shields.io/badge/Sponsor-grey?logo=github-sponsors&logoColor=pink)](https://github.com/sponsors/dev-cetera)
 [![patreon](https://img.shields.io/badge/Patreon-grey?logo=patreon)](https://www.patreon.com/robelator)
@@ -11,18 +11,16 @@
 
 <!-- BEGIN _README_CONTENT -->
 
-# ai_broker
-
 Provider-agnostic Dart abstraction over Claude, OpenAI, and Gemini. One
 interface for listing models, single-shot completions, multi-turn chat,
 and token streaming.
 
 ## Why
 
-Several apps in this workspace (`powerdb`, `chitbot`, `heylang`,
-`compledo`) each grew their own AI provider wrappers. `ai_broker`
-consolidates them so a feature implemented against `AiBroker` can run
-against any provider — and so adding the next provider is one file in
+Most apps that touch more than one LLM provider end up with three
+near-duplicate HTTP wrappers. `ai_broker` collapses them behind one
+interface so a feature written against `AiBroker` runs against any
+provider — and adding the next provider is one file in
 `lib/src/brokers/`, not three.
 
 ## Shape
@@ -89,36 +87,19 @@ API keys arrive per call. Pick a [`KeyResolver`](lib/src/key_resolver.dart):
 | `MapKeyResolver` | Tests, or apps that already hold keys in a map. |
 | (your own) | Flutter apps using secure storage — implement `KeyResolver` against your store. |
 
-For Flutter apps that already manage settings + secure storage (like
-`powerdb`), you can skip `KeyResolver` and pass `apiKey:` directly.
+For Flutter apps that already manage settings + secure storage, you
+can skip `KeyResolver` and pass `apiKey:` directly.
 
 ## What it doesn't do
 
-- **No safety gate.** `powerdb` has a SQL read-only enforcer; that
-  belongs at the call site, not in this package.
+- **No safety gate.** Read-only SQL enforcement, prompt sanitisation,
+  output filtering — call-site concern, not this package's.
 - **No persistence.** Settings, key storage, model selection — caller's
   problem.
 - **No tools / function calling.** Add when a consumer actually needs
-  it; today nothing in the workspace does.
+  it.
 - **No Flutter widgets.** Pure Dart. Build pickers / settings dialogs
   on top in the consuming app.
-
-## Files
-
-```
-lib/
-  ai_broker.dart                    # public entry — re-exports src
-  _common.dart                      # internal umbrella (dart:* + http + meta)
-  src/
-    broker.dart                     # AiBroker, AiBrokerRegistry, AiBrokerException
-    message.dart                    # AiMessage, AiRole, ChatRequest
-    key_resolver.dart               # KeyResolver, EnvKeyResolver, MapKeyResolver
-    retry.dart                      # exponential backoff for 429/503/529
-    sse.dart                        # shared SSE decoder for streaming
-    brokers/
-      openai_broker.dart
-      anthropic_broker.dart
-      gemini_broker.dart
 ```
 
 ## Run the example

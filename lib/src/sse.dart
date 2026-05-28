@@ -68,6 +68,12 @@ Stream<SseEvent> decodeSseStream(Stream<List<int>> source) async* {
 /// Opens a POST request and returns the response body as a byte
 /// stream. Throws [AiBrokerException] on non-2xx (the body is buffered
 /// in that path so we can include the error message).
+///
+/// When [client] is omitted, an ephemeral [Client] is created and
+/// closed automatically once the returned stream ends, errors, or the
+/// initial connect throws — so the caller never has to manage it.
+/// Passing [client] keeps the lifecycle with the caller (every broker
+/// in this package reuses its own long-lived client this way).
 Future<Stream<List<int>>> openSsePost({
   required Uri uri,
   required Map<String, String> headers,
@@ -75,17 +81,58 @@ Future<Stream<List<int>>> openSsePost({
   required String providerLabel,
   Client? client,
 }) async {
+  final ownsClient = client == null;
   final http = client ?? Client();
-  final req = Request('POST', uri);
-  req.headers.addAll(headers);
-  req.body = body;
-  final streamed = await http.send(req);
-  if (streamed.statusCode < 200 || streamed.statusCode >= 300) {
-    final buffered = await streamed.stream.bytesToString();
-    throw AiBrokerException(
-      '$providerLabel ${streamed.statusCode}: $buffered',
-      statusCode: streamed.statusCode,
-    );
+  StreamedResponse streamed;
+  try {
+    final req = Request('POST', uri);
+    req.headers.addAll(headers);
+    req.body = body;
+    streamed = await http.send(req);
+  } catch (_) {
+    if (ownsClient) http.close();
+    rethrow;
   }
-  return streamed.stream;
+  if (streamed.statusCode < 200 || streamed.statusCode >= 300) {
+    try {
+      final buffered = await streamed.stream.bytesToString();
+      throw AiBrokerException(
+        '$providerLabel ${streamed.statusCode}: $buffered',
+        statusCode: streamed.statusCode,
+      );
+    } finally {
+      if (ownsClient) http.close();
+    }
+  }
+  if (!ownsClient) return streamed.stream;
+  // Wrap the byte stream so the ephemeral client is released exactly
+  // once — whether the consumer drains, cancels, or hits an error.
+  final controller = StreamController<List<int>>(sync: true);
+  late StreamSubscription<List<int>> sub;
+  var closed = false;
+  void closeOnce() {
+    if (closed) return;
+    closed = true;
+    http.close();
+  }
+
+  sub = streamed.stream.listen(
+    controller.add,
+    onError: (Object e, StackTrace s) {
+      controller.addError(e, s);
+    },
+    onDone: () {
+      closeOnce();
+      controller.close();
+    },
+    cancelOnError: false,
+  );
+  controller
+    ..onCancel = () async {
+      await sub.cancel();
+      closeOnce();
+    }
+    ..onPause = sub.pause
+    ..onResume = sub.resume;
+  return controller.stream;
 }

@@ -45,7 +45,8 @@ void main() {
       test('keeps only gemini-* models that support generateContent', () async {
         final b = GeminiBroker(
           client: MockClient((req) async {
-            expect(req.url.queryParameters['key'], 'g-key');
+            expect(req.headers['x-goog-api-key'], 'g-key');
+            expect(req.url.queryParameters.containsKey('key'), isFalse);
             return Response(
               jsonEncode({
                 'models': [
@@ -130,9 +131,11 @@ void main() {
           'candidates[].content.parts[].text', () async {
         late Map<String, Object?> sentBody;
         late Uri sentUri;
+        late Map<String, String> sentHeaders;
         final b = GeminiBroker(
           client: MockClient((req) async {
             sentUri = req.url;
+            sentHeaders = req.headers;
             sentBody = jsonDecode(req.body) as Map<String, Object?>;
             return Response(
               jsonEncode({
@@ -169,7 +172,8 @@ void main() {
           sentUri.path,
           '/v1beta/models/gemini-2.5-pro:generateContent',
         );
-        expect(sentUri.queryParameters['key'], 'g-key');
+        expect(sentHeaders['x-goog-api-key'], 'g-key');
+        expect(sentUri.queryParameters.containsKey('key'), isFalse);
         expect(
           sentBody['systemInstruction'],
           {
@@ -312,9 +316,11 @@ void main() {
                 ],
               })}')
           ..writeln();
+        late Map<String, String> sentHeaders;
         final b = GeminiBroker(
           client: MockClient.streaming((req, _) async {
             sentUri = req.url;
+            sentHeaders = req.headers;
             return StreamedResponse(
               Stream<List<int>>.value(utf8.encode(body.toString())),
               200,
@@ -325,7 +331,10 @@ void main() {
             .stream(
               apiKey: 'g',
               model: 'gemini-2.5-pro',
-              request: const ChatRequest(system: '', messages: []),
+              request: const ChatRequest(
+                system: '',
+                messages: [AiMessage.user('hi')],
+              ),
             )
             .toList();
         expect(chunks, ['first ', 'second']);
@@ -334,7 +343,8 @@ void main() {
           '/v1beta/models/gemini-2.5-pro:streamGenerateContent',
         );
         expect(sentUri.queryParameters['alt'], 'sse');
-        expect(sentUri.queryParameters['key'], 'g');
+        expect(sentUri.queryParameters.containsKey('key'), isFalse);
+        expect(sentHeaders['x-goog-api-key'], 'g');
       });
 
       test('skips chunks with no candidates rather than throwing', () async {

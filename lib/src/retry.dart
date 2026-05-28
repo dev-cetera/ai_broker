@@ -20,8 +20,7 @@ import '/_common.dart';
 const retryableStatusCodes = {429, 503, 529};
 
 /// HTTP retry with exponential backoff capped at 5 attempts × 5s × 2ⁿ.
-/// Matches the loop used in chitbot's `OpenAiBot` / `GeminiBot` /
-/// `ClaudeClient`, generalised so all three brokers share one path.
+/// Shared by every broker so retry policy lives in one place.
 ///
 /// [send] runs the request. On a status in [retryableStatusCodes],
 /// waits and retries. On any other ≥400, throws [AiBrokerException]

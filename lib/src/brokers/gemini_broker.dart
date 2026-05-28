@@ -42,12 +42,12 @@ class GeminiBroker implements AiBroker {
     String? pageToken;
     for (var page = 0; page < 5; page++) {
       final query = <String, String>{
-        'key': apiKey,
         'pageSize': '50',
         if (pageToken != null) 'pageToken': pageToken,
       };
       final uri = Uri.parse('$_baseUrl/models').replace(queryParameters: query);
-      final res = await _http.get(uri).timeout(_timeout);
+      final res =
+          await _http.get(uri, headers: _authHeaders(apiKey)).timeout(_timeout);
       if (res.statusCode >= 400) return const [];
       final body = jsonDecode(res.body) as Map<String, Object?>;
       final models = body['models'] as List<Object?>? ?? const [];
@@ -94,14 +94,16 @@ class GeminiBroker implements AiBroker {
     required String model,
     required ChatRequest request,
   }) async {
-    final uri = Uri.parse('$_baseUrl/models/$model:generateContent')
-        .replace(queryParameters: {'key': apiKey});
+    final uri = Uri.parse('$_baseUrl/models/$model:generateContent');
     final body = jsonEncode(_buildPayload(request));
     final res = await retryRequest(
       send: () => _http
           .post(
             uri,
-            headers: {'Content-Type': 'application/json'},
+            headers: {
+              ..._authHeaders(apiKey),
+              'Content-Type': 'application/json',
+            },
             body: body,
           )
           .timeout(_timeout),
@@ -117,14 +119,13 @@ class GeminiBroker implements AiBroker {
     required String model,
     required ChatRequest request,
   }) async* {
-    final uri =
-        Uri.parse('$_baseUrl/models/$model:streamGenerateContent').replace(
-      queryParameters: {'key': apiKey, 'alt': 'sse'},
-    );
+    final uri = Uri.parse('$_baseUrl/models/$model:streamGenerateContent')
+        .replace(queryParameters: {'alt': 'sse'});
     final body = jsonEncode(_buildPayload(request));
     final byteStream = await openSsePost(
       uri: uri,
       headers: {
+        ..._authHeaders(apiKey),
         'Content-Type': 'application/json',
         'Accept': 'text/event-stream',
       },
@@ -163,6 +164,10 @@ class GeminiBroker implements AiBroker {
     }
     return out;
   }
+
+  Map<String, String> _authHeaders(String apiKey) => {
+        'x-goog-api-key': apiKey,
+      };
 
   Map<String, Object?> _buildPayload(ChatRequest req) => {
         if (req.system.isNotEmpty)

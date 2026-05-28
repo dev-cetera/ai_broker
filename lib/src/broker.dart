@@ -75,9 +75,6 @@ abstract class AiBroker {
 
 /// Process-wide registry. Wire brokers once at startup, then look them
 /// up by [AiBroker.id] from anywhere in the app.
-///
-/// Mirrors the registry shape from powerdb (`lib/ai/provider.dart`) so
-/// migrating existing call sites is a one-line rename.
 class AiBrokerRegistry {
   AiBrokerRegistry._();
   static final AiBrokerRegistry instance = AiBrokerRegistry._();
