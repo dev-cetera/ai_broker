@@ -34,9 +34,9 @@ Future<void> main(List<String> args) async {
     ..register(GeminiBroker());
 
   final brokerId = args.isNotEmpty ? args.first : 'anthropic';
-  final broker = AiBrokerRegistry.instance.lookup(brokerId);
+  final broker = AiBrokerRegistry.instance.lookupAs<ChatBroker>(brokerId);
   if (broker == null) {
-    stderr.writeln('Unknown broker "$brokerId". '
+    stderr.writeln('Unknown or non-chat broker "$brokerId". '
         'Known: ${AiBrokerRegistry.instance.all.map((b) => b.id).join(', ')}');
     exit(1);
   }

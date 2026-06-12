@@ -78,6 +78,31 @@ void main() {
         ]);
       });
 
+      test('sorts ids with digit-aware ordering so 3-10 ranks above 3-7',
+          () async {
+        // Plain lex would put `3-7` first (`'7' > '1'`). The broker must
+        // parse numeric runs so a future two-digit minor sorts correctly.
+        final b = AnthropicBroker(
+          client: MockClient(
+            (_) async => Response(
+              jsonEncode({
+                'data': [
+                  {'id': 'claude-3-7-sonnet'},
+                  {'id': 'claude-3-10-sonnet'},
+                  {'id': 'claude-3-2-sonnet'},
+                ],
+              }),
+              200,
+            ),
+          ),
+        );
+        expect(await b.listModels('k'), [
+          'claude-3-10-sonnet',
+          'claude-3-7-sonnet',
+          'claude-3-2-sonnet',
+        ]);
+      });
+
       test('returns empty list on 4xx', () async {
         final b = AnthropicBroker(
           client: MockClient((_) async => Response('nope', 401)),
@@ -252,6 +277,15 @@ void main() {
             .toList();
         expect(chunks, ['ok']);
       });
+    });
+
+    test(
+        'does NOT implement EmbedBroker (Anthropic has no first-party '
+        'embeddings)', () {
+      final b =
+          AnthropicBroker(client: MockClient((_) async => Response('', 200)));
+      expect(b, isA<ChatBroker>());
+      expect(b, isNot(isA<EmbedBroker>()));
     });
   });
 }

@@ -19,15 +19,20 @@ funding:
   - https://www.patreon.com/robelator
   - https://github.com/sponsors/robelator
 description: >-
-  One Dart interface for Claude, OpenAI, and Gemini: list models,
-  complete, chat, and stream.
-version: 0.2.2
+  Provider-agnostic Dart broker for Claude, OpenAI, Gemini, and Google
+  Translate. Chat, embed, translate, plus a RAG CLI over a local
+  SQLite vector store.
+version: 0.3.0
 topics:
   - ai
   - llm
-  - openai
+  - rag
+  - embeddings
   - anthropic
-  - gemini
+
+executables:
+  ai_broker:
+  aib: ai_broker
 
 ## -----------------------------------------------------------------------------
 
@@ -37,8 +42,12 @@ environment:
 ## -----------------------------------------------------------------------------
 
 dependencies:
+  args: ^2.6.0
+  crypto: ^3.0.6
   http: ^1.2.0
   meta: ^1.15.0
+  path: ^1.9.0
+  sqlite3: ^2.4.0
 
 ## -----------------------------------------------------------------------------
 

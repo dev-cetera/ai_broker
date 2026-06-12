@@ -23,4 +23,4 @@ export 'package:http/http.dart'
     show Client, Request, Response, StreamedResponse;
 export 'package:meta/meta.dart' show immutable, visibleForTesting;
 
-export 'src/_src.g.dart';
+export 'src/_src.dart';

@@ -21,7 +21,10 @@ import '/_common.dart';
 /// that, the response is a JSON array of objects, which is unfriendly
 /// to chunked parsing. We force SSE so we can share the SSE decoder
 /// with the other brokers.
-class GeminiBroker implements AiBroker {
+class GeminiBroker extends ChatBroker implements EmbedBroker {
+  /// Recommended default for [embed]. 768-d, free tier available.
+  static const defaultEmbedModel = 'text-embedding-004';
+
   static const _baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
   static const _timeout = Duration(seconds: 30);
 
@@ -67,26 +70,6 @@ class GeminiBroker implements AiBroker {
     }
     return ids.toList()..sort((a, b) => b.compareTo(a));
   }
-
-  @override
-  Future<String> complete({
-    required String apiKey,
-    required String model,
-    required String system,
-    required String user,
-    double temperature = 0.3,
-    int maxTokens = 2048,
-  }) =>
-      chat(
-        apiKey: apiKey,
-        model: model,
-        request: ChatRequest.single(
-          system: system,
-          user: user,
-          temperature: temperature,
-          maxTokens: maxTokens,
-        ),
-      );
 
   @override
   Future<String> chat({
@@ -161,6 +144,67 @@ class GeminiBroker implements AiBroker {
     final out = buf.toString();
     if (out.isEmpty && !allowEmpty) {
       throw const AiBrokerException('Gemini returned empty text.');
+    }
+    return out;
+  }
+
+  @override
+  Future<List<List<double>>> embed({
+    required String apiKey,
+    required String model,
+    required List<String> inputs,
+  }) async {
+    if (inputs.isEmpty) return const [];
+    // Gemini wants the model name prefixed with `models/` in each request
+    // *and* in the URL path.
+    final modelPath = model.startsWith('models/') ? model : 'models/$model';
+    final body = jsonEncode({
+      'requests': [
+        for (final text in inputs)
+          {
+            'model': modelPath,
+            'content': {
+              'parts': [
+                {'text': text},
+              ],
+            },
+          },
+      ],
+    });
+    final uri = Uri.parse('$_baseUrl/$modelPath:batchEmbedContents');
+    final res = await retryRequest(
+      send: () => _http
+          .post(
+            uri,
+            headers: {
+              ..._authHeaders(apiKey),
+              'Content-Type': 'application/json',
+            },
+            body: body,
+          )
+          .timeout(_timeout),
+      providerLabel: 'Gemini',
+    );
+    final json = jsonDecode(res.body) as Map<String, Object?>;
+    final embeddings = json['embeddings'] as List<Object?>?;
+    if (embeddings == null || embeddings.isEmpty) {
+      throw const AiBrokerException('Gemini returned no embeddings.');
+    }
+    final out = <List<double>>[];
+    for (final item in embeddings) {
+      final m = item as Map<String, Object?>;
+      final values = m['values'] as List<Object?>?;
+      if (values == null) {
+        throw const AiBrokerException('Gemini embedding missing values.');
+      }
+      out.add(
+        values.map((v) => (v as num).toDouble()).toList(growable: false),
+      );
+    }
+    if (out.length != inputs.length) {
+      throw AiBrokerException(
+        'Gemini returned ${out.length} embeddings for ${inputs.length} inputs.',
+      );
     }
     return out;
   }

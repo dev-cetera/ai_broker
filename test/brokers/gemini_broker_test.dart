@@ -381,5 +381,119 @@ void main() {
         expect(chunks, ['ok']);
       });
     });
+
+    group('embed', () {
+      test('posts batchEmbedContents and returns vectors in order', () async {
+        late Map<String, Object?> sentBody;
+        final b = GeminiBroker(
+          client: MockClient((req) async {
+            expect(req.method, 'POST');
+            expect(
+              req.url.toString(),
+              'https://generativelanguage.googleapis.com/v1beta/'
+              'models/text-embedding-004:batchEmbedContents',
+            );
+            expect(req.headers['x-goog-api-key'], 'g-test');
+            expect(req.headers['Content-Type'], 'application/json');
+            sentBody = jsonDecode(req.body) as Map<String, Object?>;
+            return Response(
+              jsonEncode({
+                'embeddings': [
+                  {
+                    'values': [0.1, 0.2, 0.3],
+                  },
+                  {
+                    'values': [0.4, 0.5, 0.6],
+                  },
+                ],
+              }),
+              200,
+            );
+          }),
+        );
+        final out = await b.embed(
+          apiKey: 'g-test',
+          model: 'text-embedding-004',
+          inputs: ['hello', 'world'],
+        );
+        // Body wraps each input as a per-item request with the prefixed model.
+        final requests = sentBody['requests'] as List<Object?>;
+        expect(requests, hasLength(2));
+        final first = requests[0] as Map<String, Object?>;
+        expect(first['model'], 'models/text-embedding-004');
+        final parts =
+            ((first['content'] as Map<String, Object?>)['parts'] as List);
+        expect((parts.first as Map<String, Object?>)['text'], 'hello');
+        expect(out, [
+          [0.1, 0.2, 0.3],
+          [0.4, 0.5, 0.6],
+        ]);
+      });
+
+      test('accepts a model id already prefixed with models/', () async {
+        Uri? sentUri;
+        final b = GeminiBroker(
+          client: MockClient((req) async {
+            sentUri = req.url;
+            return Response(
+              jsonEncode({
+                'embeddings': [
+                  {
+                    'values': [0.0],
+                  },
+                ],
+              }),
+              200,
+            );
+          }),
+        );
+        await b.embed(
+          apiKey: 'g',
+          model: 'models/text-embedding-004',
+          inputs: const ['hi'],
+        );
+        expect(
+          sentUri.toString(),
+          'https://generativelanguage.googleapis.com/v1beta/'
+          'models/text-embedding-004:batchEmbedContents',
+        );
+      });
+
+      test('returns empty list without hitting the network for empty inputs',
+          () async {
+        var called = false;
+        final b = GeminiBroker(
+          client: MockClient((_) async {
+            called = true;
+            return Response('', 200);
+          }),
+        );
+        expect(
+          await b.embed(apiKey: 'k', model: 'm', inputs: const []),
+          isEmpty,
+        );
+        expect(called, isFalse);
+      });
+
+      test('throws AiBrokerException on 4xx', () async {
+        final b = GeminiBroker(
+          client: MockClient(
+            (_) async => Response(
+              jsonEncode({
+                'error': {'message': 'bad key'},
+              }),
+              403,
+            ),
+          ),
+        );
+        await expectLater(
+          b.embed(apiKey: 'k', model: 'm', inputs: const ['a']),
+          throwsA(
+            isA<AiBrokerException>()
+                .having((e) => e.statusCode, 'statusCode', 403),
+          ),
+        );
+      });
+    });
   });
 }

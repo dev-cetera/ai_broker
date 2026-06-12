@@ -37,3 +37,12 @@
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# ai_broker — local artifacts that should never ship to git.
+.env
+.env.*
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.dab

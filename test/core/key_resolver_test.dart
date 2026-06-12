@@ -11,6 +11,8 @@
 // ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 //.title~
 
+import 'dart:io';
+
 import 'package:ai_broker/ai_broker.dart';
 import 'package:test/test.dart';
 
@@ -82,6 +84,85 @@ void main() {
 
     test('is an Exception', () {
       expect(const MissingKeyException('x'), isA<Exception>());
+    });
+  });
+
+  group('FileKeyResolver', () {
+    late Directory tmp;
+
+    setUp(() => tmp = Directory.systemTemp.createTempSync('aib_keys_test_'));
+    tearDown(() => tmp.deleteSync(recursive: true));
+
+    File writeKeys(String content) {
+      final f = File('${tmp.path}/.env');
+      f.writeAsStringSync(content);
+      return f;
+    }
+
+    test('parses env-var style (KEY=value)', () async {
+      final f = writeKeys('''
+OPENAI_API_KEY=sk-abc
+ANTHROPIC_API_KEY=sk-ant-zzz
+GEMINI_API_KEY=AIza123
+''');
+      final r = FileKeyResolver.fromFile(f.path);
+      expect(await r.resolve('openai'), 'sk-abc');
+      expect(await r.resolve('anthropic'), 'sk-ant-zzz');
+      expect(await r.resolve('gemini'), 'AIza123');
+    });
+
+    test('parses loose colon style with aliases (claude / openai key)',
+        () async {
+      final f = writeKeys('''
+claude: sk-ant-1
+openai key: sk-2
+gemini: g-3
+''');
+      final r = FileKeyResolver.fromFile(f.path);
+      expect(await r.resolve('anthropic'), 'sk-ant-1');
+      expect(await r.resolve('openai'), 'sk-2');
+      expect(await r.resolve('gemini'), 'g-3');
+    });
+
+    test('skips comments, blank lines, and empty values', () async {
+      final f = writeKeys('''
+# this is a comment
+// also a comment
+
+OPENAI_API_KEY=
+
+ANTHROPIC_API_KEY=sk-ant-2
+notes: ignore this unrecognised label
+''');
+      final r = FileKeyResolver.fromFile(f.path);
+      expect(await r.resolve('openai'), isNull);
+      expect(await r.resolve('anthropic'), 'sk-ant-2');
+    });
+
+    test('throws FormatException when the file is missing', () {
+      expect(
+        () => FileKeyResolver.fromFile('${tmp.path}/missing.env'),
+        throwsFormatException,
+      );
+    });
+  });
+
+  group('ChainedKeyResolver', () {
+    test('returns the first non-empty hit', () async {
+      final r = ChainedKeyResolver([
+        MapKeyResolver(const {'openai': ''}),
+        MapKeyResolver(const {'openai': 'sk-from-file'}),
+        MapKeyResolver(const {'openai': 'sk-from-env'}),
+      ]);
+      expect(await r.resolve('openai'), 'sk-from-file');
+    });
+
+    test('returns null when every layer is empty', () async {
+      final r = ChainedKeyResolver([
+        MapKeyResolver(const {}),
+        MapKeyResolver(const {'openai': ''}),
+      ]);
+      expect(await r.resolve('openai'), isNull);
     });
   });
 }

@@ -11,9 +11,20 @@
 
 <!-- BEGIN _README_CONTENT -->
 
-Provider-agnostic Dart abstraction over Claude, OpenAI, and Gemini. One
-interface for listing models, single-shot completions, multi-turn chat,
-and token streaming.
+Provider-agnostic Dart abstraction over Claude, OpenAI, and Gemini, **plus a
+RAG layer and a ready-to-use CLI** for ingesting documents, searching them,
+and asking questions grounded in the results.
+
+One library, two ways to use it:
+
+1. **As a library** — wire `OpenAiBroker` / `AnthropicBroker` / `GeminiBroker`
+   into your app and call `complete`, `chat`, `stream`, or `embed` through a
+   single interface. Optionally use the RAG primitives (`SentenceWindowChunker`,
+   `Embedder`, `CorpusStore`) to build your own retrieval-augmented features.
+2. **As a CLI** — `dart pub global activate ai_broker` and use `ai_broker`
+   (alias `aib`) to ingest text into a local vector store, search it, and
+   ask a chat model grounded questions against it. See
+   [`doc/cli.md`](doc/cli.md) for the full CLI reference.
 
 ## Why
 
@@ -23,23 +34,58 @@ interface so a feature written against `AiBroker` runs against any
 provider — and adding the next provider is one file in
 `lib/src/brokers/`, not three.
 
-## Shape
+The RAG layer is the same principle applied a level up: chunk, embed, store,
+retrieve, ground. One pipeline that works against any of the supported embed
+providers, with the chat broker chosen independently.
+
+## Broker interfaces (capability-split, 0.3.0+)
+
+Each capability is its own interface. Providers implement only the ones
+their service actually supports — no "throws UnsupportedError" stubs.
 
 ```dart
-abstract class AiBroker {
-  String get id;                                        // 'openai' | 'anthropic' | 'gemini'
+abstract class AiBroker {                       // base: id, label, listModels
+  String get id;                                // 'openai' | 'anthropic' | 'gemini'
   String get label;
   Future<List<String>> listModels(String apiKey);
-  Future<String> complete({ ... });                     // single-shot
-  Future<String> chat({ ... ChatRequest request });     // multi-turn
-  Stream<String> stream({ ... ChatRequest request });   // token-by-token
+}
+
+abstract class ChatBroker implements AiBroker {
+  Future<String> complete({ ... });                                    // single-shot
+  Future<String> chat({ ... ChatRequest request });                    // multi-turn
+  Stream<String> stream({ ... ChatRequest request });                  // token-by-token
+}
+
+abstract class EmbedBroker implements AiBroker {
+  Future<List<List<double>>> embed({ ... List<String> inputs });
 }
 ```
 
-Concrete brokers: `OpenAiBroker`, `AnthropicBroker`, `GeminiBroker`.
-Wire once via `AiBrokerRegistry`, look up by id thereafter.
+| Provider | Implements |
+|----------|-----------|
+| `OpenAiBroker` | `ChatBroker` + `EmbedBroker` |
+| `AnthropicBroker` | `ChatBroker` (no embed — Anthropic has no first-party embeddings) |
+| `GeminiBroker` | `ChatBroker` + `EmbedBroker` |
 
-## Quick start
+Wire once via `AiBrokerRegistry`, look up by id thereafter. For
+capability-typed lookups use `lookupAs<T>` — returns `null` when the
+broker doesn't implement the requested capability:
+
+```dart
+final embed = AiBrokerRegistry.instance.lookupAs<EmbedBroker>('anthropic');
+// → null  (Anthropic doesn't implement EmbedBroker)
+
+final embed = AiBrokerRegistry.instance.lookupAs<EmbedBroker>('openai');
+// → OpenAiBroker (typed as EmbedBroker)
+```
+
+> **Breaking change vs 0.2.x.** `chat` / `stream` / `complete` / `embed`
+> were on `AiBroker` directly. Code like `broker.chat(...)` against a
+> variable typed as `AiBroker` no longer compiles — either declare the
+> variable as `ChatBroker` / `EmbedBroker`, cast at the call site, or
+> use `lookupAs<ChatBroker>('id')` from the registry.
+
+## Library quick start — chat
 
 ```dart
 import 'package:ai_broker/ai_broker.dart';
@@ -50,13 +96,13 @@ void main() async {
     ..register(AnthropicBroker())
     ..register(GeminiBroker());
 
-  final broker = AiBrokerRegistry.instance.lookup('anthropic')!;
+  final broker = AiBrokerRegistry.instance.lookupAs<ChatBroker>('anthropic')!;
   final keys = EnvKeyResolver();                 // reads ANTHROPIC_API_KEY
   final apiKey = await keys.require(broker.id);
 
   final answer = await broker.complete(
     apiKey: apiKey,
-    model: 'claude-opus-4-7',
+    model: 'claude-sonnet-4-6',
     system: 'You answer concisely.',
     user: 'Capital of France?',
   );
@@ -65,7 +111,7 @@ void main() async {
   // Streaming:
   final stream = broker.stream(
     apiKey: apiKey,
-    model: 'claude-opus-4-7',
+    model: 'claude-sonnet-4-6',
     request: const ChatRequest(
       system: 'You write short prose.',
       messages: [AiMessage.user('Describe an ocean sunset.')],
@@ -77,30 +123,113 @@ void main() async {
 }
 ```
 
+## Library quick start — RAG
+
+```dart
+import 'dart:io';
+import 'package:ai_broker/ai_broker.dart';
+
+void main() async {
+  final keys = EnvKeyResolver();
+
+  // 1. Embed broker — needs to support embed(). OpenAI or Gemini.
+  final embedBroker = OpenAiBroker();
+  final embedder = Embedder(
+    broker: embedBroker,
+    apiKey: await keys.require(embedBroker.id),
+    model: OpenAiBroker.defaultEmbedModel,        // 'text-embedding-3-small'
+  );
+
+  // 2. Open / create a local SQLite-backed store.
+  final store = CorpusStore.openOrCreate('corpus.db');
+
+  // 3. Ingest a document.
+  final text = await File('handbook.md').readAsString();
+  final chunks = const SentenceWindowChunker().chunk(text, sourcePath: 'handbook.md');
+  final vectors = await embedder.embedAll(chunks.map((c) => c.text).toList());
+
+  store.upsertCollection(
+    name: 'handbook',
+    embedBroker: embedBroker.id,
+    embedModel: embedder.model,
+    dim: vectors.first.length,
+  );
+  store.addDocument(
+    collection: 'handbook',
+    sourcePath: 'handbook.md',
+    contentHash: 'h1',
+    chunks: chunks,
+    vectors: vectors,
+  );
+
+  // 4. Search.
+  final queryVec = await embedder.embedOne('how do I rotate the API key?');
+  final hits = store.search(collection: 'handbook', queryVector: queryVec, topK: 5);
+  for (final h in hits) {
+    print('${h.chunk.sourcePath}#${h.chunk.ord}  ${h.score.toStringAsFixed(3)}');
+  }
+  store.close();
+}
+```
+
+## CLI quick start
+
+```sh
+# Install (puts `ai_broker` and `aib` on PATH).
+dart pub global activate ai_broker
+
+# Put your keys in a .env file (gitignored). The CLI auto-loads ./.env.
+echo "OPENAI_API_KEY=sk-..."     >> .env
+echo "ANTHROPIC_API_KEY=sk-ant-..." >> .env
+
+# 1. Ingest some files into a local collection.
+ai_broker ingest --collection handbook --ext .md,.txt docs/
+
+# 2. Search them (snippets only, no LLM).
+ai_broker search --collection handbook "key rotation"
+
+# 3. Ask a question — retrieval + grounded answer (Anthropic by default).
+ai_broker ask --collection handbook "How do I rotate the API key?"
+
+# 4. Translate — Google Cloud Translation by default; --broker openai|anthropic|gemini
+#    routes through an LLM with domain / tone / glossary hints.
+ai_broker translate --to fr "the catalyst is unstable"
+ai_broker translate --to fr --broker anthropic --domain chemistry --tone formal \
+  --glossary "catalyst=catalyseur" "the catalyst is unstable"
+```
+
+Full reference: [`doc/cli.md`](doc/cli.md).
+
 ## Key resolution
 
-API keys arrive per call. Pick a [`KeyResolver`](lib/src/key_resolver.dart):
+API keys arrive per call. The library ships four `KeyResolver`s and a
+helper that chains them for the CLI:
 
 | Resolver | Use when |
 | --- | --- |
-| `EnvKeyResolver` | CLI / backend code. Reads `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` (overridable). |
+| `EnvKeyResolver` | Reads `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` (overridable). |
 | `MapKeyResolver` | Tests, or apps that already hold keys in a map. |
+| `FileKeyResolver.fromFile(path)` | Parses `.env`-style files (`KEY=value`) or loose `claude: …` / `openai key: …` lines. |
+| `ChainedKeyResolver([…])` | Tries each layer in order, returns the first non-empty hit. |
 | (your own) | Flutter apps using secure storage — implement `KeyResolver` against your store. |
 
-For Flutter apps that already manage settings + secure storage, you
-can skip `KeyResolver` and pass `apiKey:` directly.
+The CLI uses `ChainedKeyResolver([direct flags, --env-file or ./.env, env vars])`
+by default. Library users in Flutter apps with secure storage can skip
+`KeyResolver` entirely and pass `apiKey:` directly.
 
 ## What it doesn't do
 
-- **No safety gate.** Read-only SQL enforcement, prompt sanitisation,
-  output filtering — call-site concern, not this package's.
-- **No persistence.** Settings, key storage, model selection — caller's
-  problem.
-- **No tools / function calling.** Add when a consumer actually needs
-  it.
-- **No Flutter widgets.** Pure Dart. Build pickers / settings dialogs
-  on top in the consuming app.
-```
+- **No safety gate.** Prompt sanitisation, output filtering, content
+  moderation — call-site concern.
+- **No tools / function calling** yet.
+- **No reranking** in the RAG layer — cosine top-K only. Add a cross-encoder
+  or Cohere Rerank at the call site if quality demands it.
+- **No Flutter widgets.** Pure Dart. Build pickers / chat UIs / settings
+  dialogs on top in the consuming app.
+- **No web support for the RAG layer.** `CorpusStore` depends on native
+  `package:sqlite3`. The chat / embed APIs (`AiBroker`, `Embedder`,
+  `SentenceWindowChunker`) are pure Dart and work on web; the storage layer
+  is native-only today.
 
 ## Run the example
 

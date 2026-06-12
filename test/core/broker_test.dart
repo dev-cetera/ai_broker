@@ -14,6 +14,9 @@
 import 'package:ai_broker/ai_broker.dart';
 import 'package:test/test.dart';
 
+/// Bare [AiBroker] for registry tests — implements only the base
+/// interface; no chat / embed / etc. The registry's contract is that it
+/// stores and returns `AiBroker`s by id, regardless of capability.
 class _StubBroker implements AiBroker {
   _StubBroker(this.id, this.label);
 
@@ -25,33 +28,6 @@ class _StubBroker implements AiBroker {
 
   @override
   Future<List<String>> listModels(String apiKey) async => const [];
-
-  @override
-  Future<String> complete({
-    required String apiKey,
-    required String model,
-    required String system,
-    required String user,
-    double temperature = 0.3,
-    int maxTokens = 2048,
-  }) async =>
-      '';
-
-  @override
-  Future<String> chat({
-    required String apiKey,
-    required String model,
-    required ChatRequest request,
-  }) async =>
-      '';
-
-  @override
-  Stream<String> stream({
-    required String apiKey,
-    required String model,
-    required ChatRequest request,
-  }) =>
-      const Stream<String>.empty();
 }
 
 void main() {
@@ -112,6 +88,65 @@ void main() {
       AiBrokerRegistry.instance.register(_StubBroker('gemini', 'Gemini'));
       AiBrokerRegistry.instance.clear();
       expect(AiBrokerRegistry.instance.all, isEmpty);
+    });
+
+    test(
+        'lookupAs returns the broker only when it implements the '
+        'requested capability', () {
+      // _StubBroker implements only AiBroker — not ChatBroker / EmbedBroker.
+      AiBrokerRegistry.instance.register(_StubBroker('stub', 'Stub'));
+      expect(
+        AiBrokerRegistry.instance.lookupAs<AiBroker>('stub'),
+        isNotNull,
+        reason: 'every registered broker is at least an AiBroker',
+      );
+      expect(
+        AiBrokerRegistry.instance.lookupAs<ChatBroker>('stub'),
+        isNull,
+        reason: '_StubBroker does not implement ChatBroker',
+      );
+      expect(
+        AiBrokerRegistry.instance.lookupAs<EmbedBroker>('stub'),
+        isNull,
+        reason: '_StubBroker does not implement EmbedBroker',
+      );
+      expect(
+        AiBrokerRegistry.instance.lookupAs<ChatBroker>('missing-id'),
+        isNull,
+        reason: 'unknown ids return null regardless of type',
+      );
+    });
+  });
+
+  group('capability declarations', () {
+    // Trip-wire: if a provider class changes which capabilities it
+    // implements, these tests fail loudly. Pairs with the per-broker
+    // tests in test/brokers/.
+    test('OpenAiBroker implements ChatBroker + EmbedBroker', () {
+      final b = OpenAiBroker();
+      expect(b, isA<ChatBroker>());
+      expect(b, isA<EmbedBroker>());
+    });
+
+    test('AnthropicBroker implements ChatBroker only (no embed)', () {
+      final b = AnthropicBroker();
+      expect(b, isA<ChatBroker>());
+      expect(b, isNot(isA<EmbedBroker>()));
+    });
+
+    test(
+        'GoogleTranslateBroker implements TranslateBroker only '
+        '(no chat / embed)', () {
+      final b = GoogleTranslateBroker();
+      expect(b, isA<TranslateBroker>());
+      expect(b, isNot(isA<ChatBroker>()));
+      expect(b, isNot(isA<EmbedBroker>()));
+    });
+
+    test('GeminiBroker implements ChatBroker + EmbedBroker', () {
+      final b = GeminiBroker();
+      expect(b, isA<ChatBroker>());
+      expect(b, isA<EmbedBroker>());
     });
   });
 

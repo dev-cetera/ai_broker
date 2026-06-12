@@ -13,9 +13,14 @@
 
 import '/_common.dart';
 
-/// OpenAI chat-completions. Filters [listModels] to `gpt-*` / `o<digit>*`
-/// so the picker doesn't show whisper / embeddings / dall-e.
-class OpenAiBroker implements AiBroker {
+/// OpenAI provider — implements [ChatBroker] (`/v1/chat/completions`)
+/// and [EmbedBroker] (`/v1/embeddings`). Filters [listModels] to
+/// `gpt-*` / `o<digit>*` so the picker doesn't show whisper /
+/// embeddings / dall-e.
+class OpenAiBroker extends ChatBroker implements EmbedBroker {
+  /// Recommended default for [embed]. 1536-d, cheap, well-supported.
+  static const defaultEmbedModel = 'text-embedding-3-small';
+
   static const _baseUrl = 'https://api.openai.com/v1';
   static const _timeout = Duration(seconds: 30);
   static final _chatModelPattern = RegExp(r'^(gpt-|o\d)');
@@ -51,26 +56,6 @@ class OpenAiBroker implements AiBroker {
     ids.sort();
     return ids;
   }
-
-  @override
-  Future<String> complete({
-    required String apiKey,
-    required String model,
-    required String system,
-    required String user,
-    double temperature = 0.3,
-    int maxTokens = 2048,
-  }) =>
-      chat(
-        apiKey: apiKey,
-        model: model,
-        request: ChatRequest.single(
-          system: system,
-          user: user,
-          temperature: temperature,
-          maxTokens: maxTokens,
-        ),
-      );
 
   @override
   Future<String> chat({
@@ -148,7 +133,7 @@ class OpenAiBroker implements AiBroker {
       {
         'model': model,
         'messages': [
-          {'role': 'system', 'content': req.system},
+          if (req.system.isNotEmpty) {'role': 'system', 'content': req.system},
           for (final m in req.messages)
             {'role': m.roleName, 'content': m.content},
         ],
@@ -156,4 +141,62 @@ class OpenAiBroker implements AiBroker {
         'max_tokens': req.maxTokens,
         if (stream) 'stream': true,
       };
+
+  @override
+  Future<List<List<double>>> embed({
+    required String apiKey,
+    required String model,
+    required List<String> inputs,
+  }) async {
+    if (inputs.isEmpty) return const [];
+    final body = jsonEncode({
+      'model': model,
+      'input': inputs,
+      'encoding_format': 'float',
+    });
+    final res = await retryRequest(
+      send: () => _http
+          .post(
+            Uri.parse('$_baseUrl/embeddings'),
+            headers: {
+              'Authorization': 'Bearer $apiKey',
+              'Content-Type': 'application/json',
+            },
+            body: body,
+          )
+          .timeout(_timeout),
+      providerLabel: 'OpenAI',
+      isHardFailure: (r) =>
+          r.statusCode == 429 && r.body.toLowerCase().contains('quota'),
+    );
+    final json = jsonDecode(res.body) as Map<String, Object?>;
+    final data = json['data'] as List<Object?>?;
+    if (data == null || data.isEmpty) {
+      throw const AiBrokerException('OpenAI returned no embeddings.');
+    }
+    // Sort by index defensively; the API documents request order but
+    // pinning it locally costs nothing and protects against future churn.
+    final sorted = [...data]..sort((a, b) {
+        final ai = (a as Map<String, Object?>)['index'] as int? ?? 0;
+        final bi = (b as Map<String, Object?>)['index'] as int? ?? 0;
+        return ai.compareTo(bi);
+      });
+    final out = <List<double>>[];
+    for (final item in sorted) {
+      final m = item as Map<String, Object?>;
+      final embedding = m['embedding'] as List<Object?>?;
+      if (embedding == null) {
+        throw const AiBrokerException('OpenAI embedding missing.');
+      }
+      out.add(
+        embedding.map((v) => (v as num).toDouble()).toList(growable: false),
+      );
+    }
+    if (out.length != inputs.length) {
+      throw AiBrokerException(
+        'OpenAI returned ${out.length} embeddings for ${inputs.length} inputs.',
+      );
+    }
+    return out;
+  }
 }

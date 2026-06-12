@@ -344,5 +344,110 @@ void main() {
         );
       });
     });
+
+    group('embed', () {
+      test('posts the documented payload and returns vectors in order',
+          () async {
+        late Map<String, Object?> sentBody;
+        final b = OpenAiBroker(
+          client: MockClient((req) async {
+            expect(req.method, 'POST');
+            expect(
+              req.url.toString(),
+              'https://api.openai.com/v1/embeddings',
+            );
+            expect(req.headers['Authorization'], 'Bearer sk-test');
+            expect(req.headers['Content-Type'], 'application/json');
+            sentBody = jsonDecode(req.body) as Map<String, Object?>;
+            return Response(
+              jsonEncode({
+                'data': [
+                  {
+                    'index': 1,
+                    'embedding': [0.4, 0.5, 0.6],
+                  },
+                  {
+                    'index': 0,
+                    'embedding': [0.1, 0.2, 0.3],
+                  },
+                ],
+              }),
+              200,
+            );
+          }),
+        );
+        final out = await b.embed(
+          apiKey: 'sk-test',
+          model: 'text-embedding-3-small',
+          inputs: ['hello', 'world'],
+        );
+        expect(sentBody['model'], 'text-embedding-3-small');
+        expect(sentBody['input'], ['hello', 'world']);
+        expect(sentBody['encoding_format'], 'float');
+        // Returned in input order, not server order — defensive sort by index.
+        expect(out, [
+          [0.1, 0.2, 0.3],
+          [0.4, 0.5, 0.6],
+        ]);
+      });
+
+      test('returns empty list without hitting the network for empty inputs',
+          () async {
+        var called = false;
+        final b = OpenAiBroker(
+          client: MockClient((_) async {
+            called = true;
+            return Response('', 200);
+          }),
+        );
+        expect(
+          await b.embed(apiKey: 'k', model: 'm', inputs: const []),
+          isEmpty,
+        );
+        expect(called, isFalse);
+      });
+
+      test('throws when response count does not match input count', () async {
+        final b = OpenAiBroker(
+          client: MockClient(
+            (_) async => Response(
+              jsonEncode({
+                'data': [
+                  {
+                    'index': 0,
+                    'embedding': [0.1],
+                  },
+                ],
+              }),
+              200,
+            ),
+          ),
+        );
+        await expectLater(
+          b.embed(apiKey: 'k', model: 'm', inputs: const ['a', 'b']),
+          throwsA(isA<AiBrokerException>()),
+        );
+      });
+
+      test('throws AiBrokerException on 4xx', () async {
+        final b = OpenAiBroker(
+          client: MockClient(
+            (_) async => Response(
+              jsonEncode({
+                'error': {'message': 'bad key'},
+              }),
+              401,
+            ),
+          ),
+        );
+        await expectLater(
+          b.embed(apiKey: 'k', model: 'm', inputs: const ['a']),
+          throwsA(
+            isA<AiBrokerException>()
+                .having((e) => e.statusCode, 'statusCode', 401),
+          ),
+        );
+      });
+    });
   });
 }

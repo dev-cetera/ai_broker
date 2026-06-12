@@ -16,4 +16,4 @@
 /// registry lookup, not a code change.
 library;
 
-export 'src/_src.g.dart';
+export 'src/_src.dart';

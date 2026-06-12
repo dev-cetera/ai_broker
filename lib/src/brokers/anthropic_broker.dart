@@ -15,7 +15,12 @@ import '/_common.dart';
 
 /// Anthropic Claude (`/v1/messages`). `system` is a top-level field,
 /// not a role — keep it out of [ChatRequest.messages].
-class AnthropicBroker implements AiBroker {
+///
+/// Only implements [ChatBroker]. Anthropic doesn't host first-party
+/// embeddings (they partner with Voyage AI); pair Anthropic with
+/// [OpenAiBroker] or [GeminiBroker] for the embed side of a RAG
+/// pipeline.
+class AnthropicBroker extends ChatBroker {
   static const _baseUrl = 'https://api.anthropic.com/v1';
   static const _apiVersion = '2023-06-01';
   static const _timeout = Duration(seconds: 30);
@@ -50,31 +55,45 @@ class AnthropicBroker implements AiBroker {
       if (modelId != null) ids.add(modelId);
     }
     // Newest first — `claude-opus-4-7` should land before
-    // `claude-3-5-sonnet`. The API already returns this order; sort
-    // by id descending to normalise.
-    ids.sort((a, b) => b.compareTo(a));
+    // `claude-3-5-sonnet`. The API already returns this order; resort
+    // with a digit-aware key so that `3-10` ranks above `3-7`
+    // (plain lex would put `3-7` first because `'7' > '1'`).
+    ids.sort((a, b) => _compareNatural(b, a));
     return ids;
   }
 
-  @override
-  Future<String> complete({
-    required String apiKey,
-    required String model,
-    required String system,
-    required String user,
-    double temperature = 0.3,
-    int maxTokens = 2048,
-  }) =>
-      chat(
-        apiKey: apiKey,
-        model: model,
-        request: ChatRequest.single(
-          system: system,
-          user: user,
-          temperature: temperature,
-          maxTokens: maxTokens,
-        ),
-      );
+  /// Compares two strings as alternating runs of text and digits, so
+  /// `claude-3-10-sonnet` > `claude-3-7-sonnet`. Used for newest-first
+  /// model id sorting.
+  static int _compareNatural(String a, String b) {
+    var i = 0, j = 0;
+    while (i < a.length && j < b.length) {
+      final aDigit = _isDigit(a.codeUnitAt(i));
+      final bDigit = _isDigit(b.codeUnitAt(j));
+      if (aDigit && bDigit) {
+        var ai = i, bj = j;
+        while (ai < a.length && _isDigit(a.codeUnitAt(ai))) {
+          ai++;
+        }
+        while (bj < b.length && _isDigit(b.codeUnitAt(bj))) {
+          bj++;
+        }
+        final an = int.parse(a.substring(i, ai));
+        final bn = int.parse(b.substring(j, bj));
+        if (an != bn) return an.compareTo(bn);
+        i = ai;
+        j = bj;
+      } else {
+        final c = a[i].compareTo(b[j]);
+        if (c != 0) return c;
+        i++;
+        j++;
+      }
+    }
+    return (a.length - i).compareTo(b.length - j);
+  }
+
+  static bool _isDigit(int code) => code >= 0x30 && code <= 0x39;
 
   @override
   Future<String> chat({
@@ -160,7 +179,7 @@ class AnthropicBroker implements AiBroker {
         'model': model,
         'max_tokens': req.maxTokens,
         'temperature': req.temperature,
-        'system': req.system,
+        if (req.system.isNotEmpty) 'system': req.system,
         'messages': [
           for (final m in req.messages)
             {'role': m.roleName, 'content': m.content},
