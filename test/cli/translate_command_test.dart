@@ -123,6 +123,17 @@ class _FakeChat implements ChatBroker {
         model: model,
         stopReason: AiStopReason.endTurn,
       );
+
+  @override
+  StreamedCompletion streamDetailed({
+    required String apiKey,
+    required String model,
+    required ChatRequest request,
+  }) =>
+      StreamedCompletion.fromDeltas(
+        deltas: stream(apiKey: apiKey, model: model, request: request),
+        model: model,
+      );
 }
 
 void main() {

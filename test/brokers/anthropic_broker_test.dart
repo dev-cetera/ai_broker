@@ -282,6 +282,204 @@ void main() {
       });
     });
 
+    group('streamDetailed', () {
+      const request = ChatRequest(system: '', messages: []);
+
+      test('yields each delta as it lands, then reports the accounting',
+          () async {
+        // A controller for the wire, so the test decides exactly when each
+        // SSE event shows up and can check what the consumer has seen in
+        // between. If anything buffered the reply, `seen` would stay empty
+        // until the last chunk.
+        final wire = StreamController<List<int>>();
+        final b = AnthropicBroker(
+          client: MockClient.streaming(
+            (_, __) async => StreamedResponse(wire.stream, 200),
+          ),
+        );
+        final turn = b.streamDetailed(
+          apiKey: 'k',
+          model: 'claude-opus-5',
+          request: request,
+        );
+        var settled = false;
+        unawaited(turn.completion.then((_) => settled = true));
+        final seen = <String>[];
+        final sub = turn.deltas.listen(seen.add);
+
+        wire.add(
+          utf8.encode(
+            _sse('message_start', {
+              'message': {
+                'model': 'claude-opus-5-20260501',
+                'usage': {
+                  'input_tokens': 812,
+                  'cache_read_input_tokens': 700,
+                  'cache_creation_input_tokens': 12,
+                  'output_tokens': 1,
+                },
+              },
+            }),
+          ),
+        );
+        await _pump();
+        expect(seen, isEmpty, reason: 'message_start carries no text');
+
+        wire.add(utf8.encode(_textDelta('foo ')));
+        await _pump();
+        expect(seen, ['foo '], reason: 'delta must arrive before the end');
+        expect(settled, isFalse);
+
+        wire.add(utf8.encode(_textDelta('bar')));
+        await _pump();
+        expect(seen, ['foo ', 'bar']);
+        expect(settled, isFalse, reason: 'nothing has ended the turn yet');
+
+        wire
+          ..add(
+            utf8.encode(
+              _sse('message_delta', {
+                'delta': {'stop_reason': 'max_tokens'},
+                'usage': {'output_tokens': 42},
+              }),
+            ),
+          )
+          ..add(utf8.encode(_sse('message_stop', const {})));
+
+        final done = await turn.completion;
+        expect(done.text, 'foo bar');
+        expect(
+          done.model,
+          'claude-opus-5-20260501',
+          reason: 'message_start names the model that actually served it',
+        );
+        expect(done.stopReason, AiStopReason.maxTokens);
+        expect(done.isTruncated, isTrue);
+        expect(done.inputTokens, 812);
+        expect(
+          done.outputTokens,
+          42,
+          reason: "message_delta's final count wins over message_start's",
+        );
+        expect(done.cacheReadInputTokens, 700);
+        expect(done.cacheCreationInputTokens, 12);
+
+        await sub.cancel();
+        await wire.close();
+      });
+
+      test('a mid-stream refusal is a completion, not an error', () async {
+        final body = StringBuffer()
+          ..write(
+            _sse('message_start', {
+              'message': {
+                'model': 'claude-opus-5',
+                'usage': {'input_tokens': 20},
+              },
+            }),
+          )
+          ..write(_textDelta("I can't help with that."))
+          ..write(
+            _sse('message_delta', {
+              'delta': {'stop_reason': 'refusal'},
+              'usage': {'output_tokens': 7},
+            }),
+          )
+          ..write(_sse('message_stop', const {}));
+        final b = AnthropicBroker(
+          client: MockClient.streaming(
+            (_, __) async => StreamedResponse(
+              Stream<List<int>>.value(utf8.encode(body.toString())),
+              200,
+            ),
+          ),
+        );
+        final turn = b.streamDetailed(
+          apiKey: 'k',
+          model: 'claude-opus-5',
+          request: request,
+        );
+        expect(await turn.deltas.toList(), ["I can't help with that."]);
+        final done = await turn.completion;
+        expect(done.stopReason, AiStopReason.refusal);
+        expect(done.isRefusal, isTrue);
+        expect(done.text, "I can't help with that.");
+        expect(done.inputTokens, 20);
+        expect(done.outputTokens, 7);
+      });
+
+      test('reports `unknown` when the stream ends without a message_delta',
+          () async {
+        final body = StringBuffer()
+          ..write(_textDelta('cut short'))
+          ..write(_sse('message_stop', const {}));
+        final b = AnthropicBroker(
+          client: MockClient.streaming(
+            (_, __) async => StreamedResponse(
+              Stream<List<int>>.value(utf8.encode(body.toString())),
+              200,
+            ),
+          ),
+        );
+        final turn = b.streamDetailed(
+          apiKey: 'k',
+          model: 'claude-opus-5',
+          request: request,
+        );
+        await turn.deltas.toList();
+        final done = await turn.completion;
+        expect(done.stopReason, AiStopReason.unknown);
+        expect(done.model, 'claude-opus-5', reason: 'falls back to requested');
+      });
+
+      test('a failed request fails the deltas and the completion alike',
+          () async {
+        final b = AnthropicBroker(
+          client: MockClient.streaming(
+            (_, __) async => StreamedResponse(
+              Stream<List<int>>.value(utf8.encode('overloaded')),
+              529,
+            ),
+          ),
+        );
+        final turn = b.streamDetailed(
+          apiKey: 'k',
+          model: 'claude-opus-5',
+          request: request,
+        );
+        await expectLater(
+          turn.deltas.toList(),
+          throwsA(isA<AiBrokerException>()),
+        );
+        await expectLater(turn.completion, throwsA(isA<AiBrokerException>()));
+      });
+
+      test('stream() failing raises no unhandled async error', () async {
+        // `stream()` is `streamDetailed().deltas` — nobody awaits the
+        // completion future, so its error must not escape the zone.
+        final errors = <Object>[];
+        await runZonedGuarded(
+          () async {
+            final b = AnthropicBroker(
+              client: MockClient.streaming(
+                (_, __) async => StreamedResponse(
+                  Stream<List<int>>.value(utf8.encode('nope')),
+                  500,
+                ),
+              ),
+            );
+            await b
+                .stream(apiKey: 'k', model: 'claude-opus-5', request: request)
+                .toList()
+                .catchError((Object _) => <String>[]);
+            await _pump();
+          },
+          (e, _) => errors.add(e),
+        );
+        expect(errors, isEmpty);
+      });
+    });
+
     test(
         'does NOT implement EmbedBroker (Anthropic has no first-party '
         'embeddings)', () {
@@ -291,4 +489,21 @@ void main() {
       expect(b, isNot(isA<EmbedBroker>()));
     });
   });
+}
+
+/// One framed SSE event, exactly as Anthropic writes it.
+String _sse(String event, Map<String, Object?> data) =>
+    'event: $event\ndata: ${jsonEncode(data)}\n\n';
+
+String _textDelta(String text) => _sse('content_block_delta', {
+      'delta': {'type': 'text_delta', 'text': text},
+    });
+
+/// Hands whatever has arrived to the listener before the test looks at it.
+/// A few event-loop turns, not one: the SSE decoder and the generator behind
+/// the deltas each cost a turn.
+Future<void> _pump() async {
+  for (var i = 0; i < 8; i++) {
+    await Future<void>.delayed(Duration.zero);
+  }
 }

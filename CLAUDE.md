@@ -23,7 +23,10 @@ lib/src/
     code_fence.dart            — stripCodeFence() post-processor
 
   chat/
-    chat_broker.dart           — ChatBroker interface (complete / chat / stream)
+    chat_broker.dart           — ChatBroker interface (complete / chat / chatDetailed /
+                                 stream / streamDetailed)
+    completion.dart            — AiCompletion / StreamedCompletion / AiStopReason / AiEffort
+    json_schema.dart           — toGeminiSchema / toOpenAiStrictSchema (pure, no I/O)
     message.dart               — ChatRequest / AiMessage (system is on ChatRequest, not a role)
 
   embed/
@@ -87,6 +90,24 @@ When editing or adding a broker, mind these — they're the things that diverge 
 - **System prompt placement.** OpenAI: `role:system` message. Anthropic: top-level `system` field. Gemini: top-level `systemInstruction` object. Keep `system` out of `ChatRequest.messages` — it's a top-level field on `ChatRequest`.
 - **`listModels` filtering.** Each broker filters the catalog so picker UIs don't see embeddings / whisper / dall-e. OpenAI: `^(gpt-|o\d)`. Anthropic: no filter (sorted descending so newest claude lands first). Gemini: must start with `gemini-` and support `generateContent`; paginated up to 5×50. `GoogleTranslateBroker.listModels` always returns `[]` (v2 has no `/models`).
 - **Streaming format.** OpenAI & Anthropic are SSE; Gemini is JSON-array by default and *must* be requested with `?alt=sse` so the shared `decodeSseStream` works. Anthropic uses named SSE events (`content_block_delta`, `message_stop`); OpenAI uses `data: [DONE]` to terminate; Gemini's SSE chunks share the same `candidates → content → parts → text` shape as the non-streaming response, so one extractor handles both.
+- **Streamed accounting.** `stream` is `streamDetailed(...).deltas` on both streaming brokers — one parse path, so anything added to the read loop shows up in both. Anthropic takes usage from `message_start` (input + cache counts, serving model) and `message_delta` (stop reason, final output count); Gemini from `usageMetadata` + `finishReason` on the chunks. The read loops end in `yield*`, **not** `await for`: an `await for` leaves the generator parked on an await, where a consumer's `subscription.cancel()` hangs until the next byte arrives and the `finally` that settles the completion never runs. The cost of `yield*` is that stream errors bypass the enclosing `catch`, hence the `handleError` hop that fails the completion before re-throwing.
+- **Structured output (`ChatRequest.jsonSchema`).** All three chat brokers
+  honour it, in three different dialects, and the providers want *opposite*
+  things from the same schema. Anthropic takes JSON Schema verbatim in
+  `output_config.format`. Gemini takes an **OpenAPI 3.0 subset** in
+  `generationConfig.responseSchema` where `additionalProperties` is a hard 400
+  (`Unknown name "additionalProperties" at
+  'generation_config.response_schema'`) and nullability is a `nullable` flag,
+  not a `['string', 'null']` union. OpenAI's `strict` mode **requires**
+  `additionalProperties: false` on every object plus every property named in
+  `required`. `lib/src/chat/json_schema.dart` holds both translations as pure
+  functions — put dialect knowledge there, not in a broker. `toGeminiSchema`
+  returns null when a schema has no safe translation (recursive/unresolvable
+  `$ref`, a real multi-type union); the broker then sends
+  `responseMimeType: 'application/json'` alone, because unconstrained JSON
+  beats both prose and a 400. Every broker builds its payload in one
+  `@visibleForTesting buildPayload`, shared by the streaming and
+  non-streaming paths — keep it that way so the two cannot diverge.
 - **Retry policy.** Use `retryRequest` for every non-streaming call. Pass `isHardFailure` when a status code can mean either "retry" or "give up" — currently only OpenAI 429 (`quota` in body) needs this. SSE calls bypass retry (mid-stream restart isn't sound).
 - **Embed per-call limits.** OpenAI `text-embedding-3-*`: ≤2048 inputs, ≤300k tokens per request, ≤8191 tokens each. Gemini `text-embedding-004`: ≤100 per call. The broker just forwards the list — use the higher-level `Embedder` to batch.
 - **Google Translate glossary.** Cloud Translation v2 doesn't expose v3's server-side glossary resource, so `GoogleTranslateBroker` implements glossary client-side via `<span translate="no">…</span>` HTML wrapping with `format: 'html'`. Source text + glossary targets are HTML-escaped before sending; entities in the response are decoded back. Matching is exact, case-sensitive, substring — provide every casing you care about and use distinctive terms. On overlap the longer key wins; otherwise the earliest match wins. `domain` / `tone` / `context` hints are silently accepted but ignored by v2 — use `LlmTranslator` when they matter.

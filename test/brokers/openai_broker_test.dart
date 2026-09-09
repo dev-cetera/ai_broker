@@ -19,6 +19,8 @@ import 'package:http/http.dart';
 import 'package:http/testing.dart';
 import 'package:test/test.dart';
 
+import '../support/judge_schema.dart';
+
 void main() {
   group('OpenAiBroker', () {
     test('id and label', () {
@@ -448,6 +450,159 @@ void main() {
           ),
         );
       });
+    });
+  });
+
+  // Structured output. Before 0.6.0 `ChatRequest.jsonSchema` was dropped here
+  // in silence and the model answered in prose — the bug that abandoned a
+  // whole prompt-improvement run.
+  group('OpenAiBroker structured output', () {
+    final broker = OpenAiBroker();
+
+    Map<String, Object?> schemaFor(ChatRequest request, {bool stream = false}) {
+      final payload = broker.buildPayload('gpt-4o', request, stream: stream);
+      final format = payload['response_format']! as Map<String, Object?>;
+      expect(format['type'], 'json_schema');
+      final wrapper = format['json_schema']! as Map<String, Object?>;
+      expect(wrapper['name'], 'response');
+      expect(wrapper['strict'], isTrue);
+      return wrapper['schema']! as Map<String, Object?>;
+    }
+
+    test('a json schema becomes a strict response_format', () {
+      final payload = broker.buildPayload(
+        'gpt-4o',
+        const ChatRequest(
+          system: 's',
+          messages: [AiMessage.user('score this')],
+          jsonSchema: kJudgeJsonSchema,
+        ),
+        stream: false,
+      );
+      expect(payload['response_format'], {
+        'type': 'json_schema',
+        'json_schema': {
+          'name': 'response',
+          'strict': true,
+          'schema': toOpenAiStrictSchema(kJudgeJsonSchema),
+        },
+      });
+    });
+
+    test('every object forbids extras and requires every property', () {
+      final schema = schemaFor(
+        const ChatRequest(
+          system: 's',
+          messages: [],
+          jsonSchema: kJudgeJsonSchema,
+        ),
+      );
+      final objects = objectSchemasDeep(schema);
+      expect(objects, hasLength(3));
+      for (final object in objects) {
+        expect(
+          object['additionalProperties'],
+          isFalse,
+          reason: 'strict mode rejects an object without it — the exact '
+              'opposite of what Gemini accepts',
+        );
+        final properties = object['properties']! as Map<String, Object?>;
+        expect(object['required'], properties.keys.toList());
+      }
+    });
+
+    test('response_format is absent when no schema was asked for', () {
+      final payload = broker.buildPayload(
+        'gpt-4o',
+        const ChatRequest(system: 's', messages: []),
+        stream: false,
+      );
+      expect(payload.containsKey('response_format'), isFalse);
+    });
+
+    test('the streaming payload carries it too', () {
+      final payload = broker.buildPayload(
+        'gpt-4o',
+        const ChatRequest(
+          system: 's',
+          messages: [],
+          jsonSchema: kJudgeJsonSchema,
+        ),
+        stream: true,
+      );
+      expect(payload['stream'], isTrue);
+      expect(
+        schemaFor(
+          const ChatRequest(
+            system: 's',
+            messages: [],
+            jsonSchema: kJudgeJsonSchema,
+          ),
+          stream: true,
+        ),
+        toOpenAiStrictSchema(kJudgeJsonSchema),
+      );
+    });
+
+    test('chat/completions puts it on the wire', () async {
+      late Map<String, Object?> sent;
+      final b = OpenAiBroker(
+        client: MockClient((req) async {
+          sent = jsonDecode(req.body) as Map<String, Object?>;
+          return Response(
+            jsonEncode({
+              'choices': [
+                {
+                  'message': {'content': '{"changelog":"none"}'},
+                },
+              ],
+            }),
+            200,
+          );
+        }),
+      );
+      await b.chat(
+        apiKey: 'k',
+        model: 'gpt-4o',
+        request: const ChatRequest(
+          system: '',
+          messages: [AiMessage.user('score')],
+          jsonSchema: kJudgeJsonSchema,
+        ),
+      );
+      final format = sent['response_format']! as Map<String, Object?>;
+      final wrapper = format['json_schema']! as Map<String, Object?>;
+      expect(wrapper['strict'], isTrue);
+      expect(wrapper['schema'], toOpenAiStrictSchema(kJudgeJsonSchema));
+    });
+
+    test('the streaming call sends the same response_format', () async {
+      late Map<String, Object?> sent;
+      final b = OpenAiBroker(
+        client: MockClient.streaming((req, bodyStream) async {
+          sent = jsonDecode(await bodyStream.bytesToString())
+              as Map<String, Object?>;
+          return StreamedResponse(
+            Stream<List<int>>.value(utf8.encode('data: [DONE]\n\n')),
+            200,
+          );
+        }),
+      );
+      await b
+          .stream(
+            apiKey: 'k',
+            model: 'gpt-4o',
+            request: const ChatRequest(
+              system: '',
+              messages: [AiMessage.user('score')],
+              jsonSchema: kJudgeJsonSchema,
+            ),
+          )
+          .toList();
+      expect(sent['stream'], isTrue);
+      final format = sent['response_format']! as Map<String, Object?>;
+      final wrapper = format['json_schema']! as Map<String, Object?>;
+      expect(wrapper['schema'], toOpenAiStrictSchema(kJudgeJsonSchema));
     });
   });
 }

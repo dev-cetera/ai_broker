@@ -26,7 +26,13 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
   static const defaultEmbedModel = 'text-embedding-004';
 
   static const _baseUrl = 'https://generativelanguage.googleapis.com/v1beta';
-  static const _timeout = Duration(seconds: 30);
+
+  /// Chat requests are not quick calls. A reasoning model doing a structured
+  /// judge over a knowledge bundle measured 21.5s here on a synthetic input and
+  /// more on a real one, so the old 30s cut them off mid-thought and surfaced
+  /// as a bare TimeoutException far from the cause. Matches the Anthropic
+  /// broker, which was raised for exactly this reason in 0.4.0.
+  static const _timeout = Duration(seconds: 120);
 
   final Client _http;
 
@@ -78,7 +84,7 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
     required ChatRequest request,
   }) async {
     final uri = Uri.parse('$_baseUrl/models/$model:generateContent');
-    final body = jsonEncode(_buildPayload(request));
+    final body = jsonEncode(buildPayload(request));
     final res = await retryRequest(
       send: () => _http
           .post(
@@ -101,26 +107,136 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
-  }) async* {
-    final uri = Uri.parse('$_baseUrl/models/$model:streamGenerateContent')
-        .replace(queryParameters: {'alt': 'sse'});
-    final body = jsonEncode(_buildPayload(request));
-    final byteStream = await openSsePost(
-      uri: uri,
-      headers: {
-        ..._authHeaders(apiKey),
-        'Content-Type': 'application/json',
-        'Accept': 'text/event-stream',
-      },
-      body: body,
-      providerLabel: 'Gemini',
-      client: _http,
+  }) =>
+      streamDetailed(apiKey: apiKey, model: model, request: request).deltas;
+
+  @override
+  StreamedCompletion streamDetailed({
+    required String apiKey,
+    required String model,
+    required ChatRequest request,
+  }) {
+    final completer = Completer<AiCompletion>();
+    // A caller that only drains the text — every `stream()` call — already
+    // sees a failure on the stream itself; without a listener here the same
+    // error would also surface as an unhandled async error.
+    completer.future.ignore();
+    return StreamedCompletion(
+      deltas: _streamDeltas(
+        apiKey: apiKey,
+        model: model,
+        request: request,
+        completer: completer,
+      ),
+      completion: completer.future,
     );
-    await for (final event in decodeSseStream(byteStream)) {
-      if (event.data.isEmpty) continue;
+  }
+
+  /// The SSE read loop behind [stream] and [streamDetailed]. Gemini repeats
+  /// `usageMetadata` on chunks and settles it on the last one, so the running
+  /// values are simply overwritten as they arrive.
+  Stream<String> _streamDeltas({
+    required String apiKey,
+    required String model,
+    required ChatRequest request,
+    required Completer<AiCompletion> completer,
+  }) async* {
+    final buf = StringBuffer();
+    var servingModel = model;
+    var stopReason = AiStopReason.unknown;
+    var inputTokens = 0;
+    var outputTokens = 0;
+    var cachedTokens = 0;
+
+    Iterable<String> consume(SseEvent event) sync* {
+      if (event.data.isEmpty) return;
       final json = jsonDecode(event.data) as Map<String, Object?>;
+      servingModel = json['modelVersion'] as String? ?? servingModel;
+      final usage = json['usageMetadata'] as Map<String, Object?>?;
+      if (usage != null) {
+        int? at(String key) => (usage[key] as num?)?.toInt();
+        inputTokens = at('promptTokenCount') ?? inputTokens;
+        outputTokens = at('candidatesTokenCount') ?? outputTokens;
+        cachedTokens = at('cachedContentTokenCount') ?? cachedTokens;
+      }
+      final candidates = json['candidates'] as List<Object?>? ?? const [];
+      if (candidates.isNotEmpty) {
+        final first = candidates.first as Map<String, Object?>;
+        final finish = first['finishReason'] as String?;
+        if (finish != null) stopReason = _stopReasonFrom(finish);
+      }
       final text = _extractText(json, allowEmpty: true);
-      if (text.isNotEmpty) yield text;
+      if (text.isEmpty) return;
+      buf.write(text);
+      yield text;
+    }
+
+    try {
+      final uri = Uri.parse('$_baseUrl/models/$model:streamGenerateContent')
+          .replace(queryParameters: {'alt': 'sse'});
+      final body = jsonEncode(buildPayload(request));
+      final byteStream = await openSsePost(
+        uri: uri,
+        headers: {
+          ..._authHeaders(apiKey),
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+        },
+        body: body,
+        providerLabel: 'Gemini',
+        client: _http,
+      );
+      // `yield*` rather than `await for`, so a consumer that cancels
+      // mid-reply is acknowledged at once and the `finally` below still
+      // runs. Stream errors bypass the enclosing catch as a result, hence
+      // the `handleError` hop.
+      yield* decodeSseStream(byteStream).expand(consume).handleError(
+        (Object e, StackTrace st) {
+          if (!completer.isCompleted) completer.completeError(e, st);
+          Error.throwWithStackTrace(e, st);
+        },
+      );
+    } catch (e, st) {
+      // Connection failures and non-2xx responses, which throw before the
+      // first event arrives.
+      if (!completer.isCompleted) completer.completeError(e, st);
+      rethrow;
+    } finally {
+      // Also the cancellation path: a consumer that walks away mid-reply gets
+      // a completion for the part that did arrive rather than a hung future.
+      if (!completer.isCompleted) {
+        completer.complete(
+          AiCompletion(
+            text: buf.toString().trim(),
+            model: servingModel,
+            stopReason: stopReason,
+            inputTokens: inputTokens,
+            outputTokens: outputTokens,
+            cacheReadInputTokens: cachedTokens,
+          ),
+        );
+      }
+    }
+  }
+
+  /// Gemini has its own vocabulary for why generation stopped. Map it onto
+  /// the shared [AiStopReason] so callers branch identically across
+  /// providers — in particular, every safety stop reads as a refusal.
+  static AiStopReason _stopReasonFrom(String finishReason) {
+    switch (finishReason) {
+      case 'STOP':
+        return AiStopReason.endTurn;
+      case 'MAX_TOKENS':
+        return AiStopReason.maxTokens;
+      case 'SAFETY':
+      case 'RECITATION':
+      case 'BLOCKLIST':
+      case 'PROHIBITED_CONTENT':
+      case 'SPII':
+      case 'IMAGE_SAFETY':
+        return AiStopReason.refusal;
+      default:
+        return AiStopReason.unknown;
     }
   }
 
@@ -213,25 +329,43 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
         'x-goog-api-key': apiKey,
       };
 
-  Map<String, Object?> _buildPayload(ChatRequest req) => {
-        if (req.system.isNotEmpty)
-          'systemInstruction': {
+  /// Build the request body. Shared by [chat] and the streaming read loop, so
+  /// structured output behaves identically on both.
+  ///
+  /// [ChatRequest.jsonSchema] rides in `generationConfig`. Two fields, not
+  /// one: `responseMimeType` is what actually forces JSON instead of prose,
+  /// and `responseSchema` constrains its shape. Gemini speaks an OpenAPI 3.0
+  /// subset rather than JSON Schema — forwarding the caller's schema unchanged
+  /// is a 400 (`Unknown name "additionalProperties"`), so it goes through
+  /// [toGeminiSchema] first. When no safe translation exists that returns
+  /// null and only the mime type is sent: unconstrained JSON is still JSON,
+  /// which beats both prose and a rejected request.
+  @visibleForTesting
+  Map<String, Object?> buildPayload(ChatRequest req) {
+    final schema = req.jsonSchema;
+    final responseSchema = schema == null ? null : toGeminiSchema(schema);
+    return {
+      if (req.system.isNotEmpty)
+        'systemInstruction': {
+          'parts': [
+            {'text': req.system},
+          ],
+        },
+      'contents': [
+        for (final m in req.messages)
+          {
+            'role': m.role == AiRole.user ? 'user' : 'model',
             'parts': [
-              {'text': req.system},
+              {'text': m.content},
             ],
           },
-        'contents': [
-          for (final m in req.messages)
-            {
-              'role': m.role == AiRole.user ? 'user' : 'model',
-              'parts': [
-                {'text': m.content},
-              ],
-            },
-        ],
-        'generationConfig': {
-          'temperature': req.temperature,
-          'maxOutputTokens': req.maxTokens,
-        },
-      };
+      ],
+      'generationConfig': {
+        'temperature': req.temperature,
+        'maxOutputTokens': req.maxTokens,
+        if (schema != null) 'responseMimeType': 'application/json',
+        if (responseSchema != null) 'responseSchema': responseSchema,
+      },
+    };
+  }
 }

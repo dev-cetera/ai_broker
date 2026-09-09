@@ -15,6 +15,7 @@ export './brokers/google_translate_broker.dart';
 export './brokers/openai_broker.dart';
 export './chat/chat_broker.dart';
 export './chat/completion.dart';
+export './chat/json_schema.dart';
 export './chat/message.dart';
 export './cli/ask_command.dart';
 export './cli/collections_command.dart';

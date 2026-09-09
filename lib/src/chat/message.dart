@@ -64,8 +64,25 @@ class ChatRequest {
 
   /// When set, the reply is constrained to this JSON Schema and comes back
   /// as valid JSON by construction — no code fences to strip, no
-  /// retry-on-parse loop. Every object in the schema needs
-  /// `additionalProperties: false` and a `required` list.
+  /// retry-on-parse loop.
+  ///
+  /// **Honoured by every chat broker**, each in its own dialect: Anthropic
+  /// takes the schema verbatim in `output_config.format`; OpenAI wraps it in
+  /// a `response_format` with `strict: true`; Gemini gets
+  /// `responseMimeType: 'application/json'` plus an OpenAPI-subset
+  /// translation in `responseSchema`. Write it once, as ordinary JSON Schema,
+  /// and let [toGeminiSchema] / [toOpenAiStrictSchema] reconcile the
+  /// differences — including the one that cuts both ways, where OpenAI's
+  /// strict mode *requires* the `additionalProperties: false` that Gemini
+  /// rejects with a 400.
+  ///
+  /// The portable subset to write in: objects with `properties`, `required`
+  /// and `additionalProperties: false`; arrays with `items`; `enum` for
+  /// closed string sets; `type: ['string', 'null']` for nullable fields.
+  /// Value bounds (`minLength`, `maximum`, `pattern`, …) are dropped on the
+  /// way to Gemini — state those in the prompt instead. A schema Gemini
+  /// cannot express at all (a recursive `$ref`, a `['string', 'number']`
+  /// union) still yields JSON, just unconstrained.
   final Map<String, Object?>? jsonSchema;
 
   /// Mark the system prompt as a cacheable prefix. Worth it whenever the

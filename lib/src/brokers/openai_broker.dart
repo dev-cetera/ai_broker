@@ -22,7 +22,13 @@ class OpenAiBroker extends ChatBroker implements EmbedBroker {
   static const defaultEmbedModel = 'text-embedding-3-small';
 
   static const _baseUrl = 'https://api.openai.com/v1';
-  static const _timeout = Duration(seconds: 30);
+
+  /// Chat requests are not quick calls. A reasoning model doing a structured
+  /// judge over a knowledge bundle measured 21.5s here on a synthetic input and
+  /// more on a real one, so the old 30s cut them off mid-thought and surfaced
+  /// as a bare TimeoutException far from the cause. Matches the Anthropic
+  /// broker, which was raised for exactly this reason in 0.4.0.
+  static const _timeout = Duration(seconds: 120);
   static final _chatModelPattern = RegExp(r'^(gpt-|o\d)');
 
   final Client _http;
@@ -63,7 +69,7 @@ class OpenAiBroker extends ChatBroker implements EmbedBroker {
     required String model,
     required ChatRequest request,
   }) async {
-    final body = jsonEncode(_buildPayload(model, request, stream: false));
+    final body = jsonEncode(buildPayload(model, request, stream: false));
     final res = await retryRequest(
       send: () => _http
           .post(
@@ -99,7 +105,7 @@ class OpenAiBroker extends ChatBroker implements EmbedBroker {
     required String model,
     required ChatRequest request,
   }) async* {
-    final body = jsonEncode(_buildPayload(model, request, stream: true));
+    final body = jsonEncode(buildPayload(model, request, stream: true));
     final byteStream = await openSsePost(
       uri: Uri.parse('$_baseUrl/chat/completions'),
       headers: {
@@ -125,22 +131,43 @@ class OpenAiBroker extends ChatBroker implements EmbedBroker {
     }
   }
 
-  Map<String, Object?> _buildPayload(
+  /// Build the request body. Shared by [chat] and [stream], so structured
+  /// output behaves identically on both.
+  ///
+  /// [ChatRequest.jsonSchema] becomes `response_format`. `strict: true` is
+  /// what makes the constraint binding rather than advisory, and it is also
+  /// the fussiest mode on the wire: every object must carry
+  /// `additionalProperties: false` and must name every property in
+  /// `required`. [toOpenAiStrictSchema] adds both where the caller left them
+  /// out — the exact opposite of what Gemini needs from the same schema.
+  @visibleForTesting
+  Map<String, Object?> buildPayload(
     String model,
     ChatRequest req, {
     required bool stream,
-  }) =>
-      {
-        'model': model,
-        'messages': [
-          if (req.system.isNotEmpty) {'role': 'system', 'content': req.system},
-          for (final m in req.messages)
-            {'role': m.roleName, 'content': m.content},
-        ],
-        'temperature': req.temperature,
-        'max_tokens': req.maxTokens,
-        if (stream) 'stream': true,
-      };
+  }) {
+    final schema = req.jsonSchema;
+    return {
+      'model': model,
+      'messages': [
+        if (req.system.isNotEmpty) {'role': 'system', 'content': req.system},
+        for (final m in req.messages)
+          {'role': m.roleName, 'content': m.content},
+      ],
+      'temperature': req.temperature,
+      'max_tokens': req.maxTokens,
+      if (schema != null)
+        'response_format': {
+          'type': 'json_schema',
+          'json_schema': {
+            'name': 'response',
+            'strict': true,
+            'schema': toOpenAiStrictSchema(schema),
+          },
+        },
+      if (stream) 'stream': true,
+    };
+  }
 
   @override
   Future<List<List<double>>> embed({

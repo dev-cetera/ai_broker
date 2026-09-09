@@ -73,4 +73,27 @@ abstract class ChatBroker implements AiBroker {
     required String model,
     required ChatRequest request,
   });
+
+  /// Like [stream], but also reports what the turn cost and why it ended.
+  /// The text still arrives incrementally — on
+  /// [StreamedCompletion.deltas], the same events [stream] yields — while
+  /// [StreamedCompletion.completion] resolves once the stream is done.
+  ///
+  /// This is what [chatDetailed] is to [chat]: use it anywhere a streamed
+  /// turn has to be billed, or where a mid-stream refusal needs to be told
+  /// apart from a normal end.
+  ///
+  /// The default implementation wraps [stream] and reports the accumulated
+  /// text with zero tokens and [AiStopReason.endTurn], so providers whose
+  /// stream carries no accounting still satisfy the interface. Override it
+  /// wherever the wire format does carry usage.
+  StreamedCompletion streamDetailed({
+    required String apiKey,
+    required String model,
+    required ChatRequest request,
+  }) =>
+      StreamedCompletion.fromDeltas(
+        deltas: stream(apiKey: apiKey, model: model, request: request),
+        model: model,
+      );
 }

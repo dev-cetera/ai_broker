@@ -19,6 +19,8 @@ import 'package:http/http.dart';
 import 'package:http/testing.dart';
 import 'package:test/test.dart';
 
+import '../support/judge_schema.dart';
+
 void main() {
   group('GeminiBroker', () {
     test('id and label', () {
@@ -382,6 +384,120 @@ void main() {
       });
     });
 
+    group('streamDetailed', () {
+      const request = ChatRequest(system: '', messages: []);
+
+      GeminiBroker brokerFor(String body) => GeminiBroker(
+            client: MockClient.streaming(
+              (_, __) async => StreamedResponse(
+                Stream<List<int>>.value(utf8.encode(body)),
+                200,
+              ),
+            ),
+          );
+
+      test('picks up usageMetadata and the serving model from the last chunk',
+          () async {
+        // Gemini settles usageMetadata on the final chunk; the earlier ones
+        // carry text only.
+        final body = StringBuffer()
+          ..writeln('data: ${jsonEncode({
+                'candidates': [
+                  {
+                    'content': {
+                      'parts': [
+                        {'text': 'first '},
+                      ],
+                    },
+                  },
+                ],
+                'modelVersion': 'gemini-2.5-pro-002',
+              })}')
+          ..writeln()
+          ..writeln('data: ${jsonEncode({
+                'candidates': [
+                  {
+                    'content': {
+                      'parts': [
+                        {'text': 'second'},
+                      ],
+                    },
+                    'finishReason': 'STOP',
+                  },
+                ],
+                'usageMetadata': {
+                  'promptTokenCount': 31,
+                  'candidatesTokenCount': 9,
+                  'cachedContentTokenCount': 4,
+                  'totalTokenCount': 40,
+                },
+              })}')
+          ..writeln();
+        final b = brokerFor(body.toString());
+        final turn = b.streamDetailed(
+          apiKey: 'g',
+          model: 'gemini-2.5-pro',
+          request: request,
+        );
+        expect(await turn.deltas.toList(), ['first ', 'second']);
+        final done = await turn.completion;
+        expect(done.text, 'first second');
+        expect(done.model, 'gemini-2.5-pro-002');
+        expect(done.stopReason, AiStopReason.endTurn);
+        expect(done.inputTokens, 31);
+        expect(done.outputTokens, 9);
+        expect(done.cacheReadInputTokens, 4);
+      });
+
+      test('a SAFETY finish reason reads as a refusal', () async {
+        final body = StringBuffer()
+          ..writeln('data: ${jsonEncode({
+                'candidates': [
+                  {'finishReason': 'SAFETY'},
+                ],
+                'usageMetadata': {'promptTokenCount': 12},
+              })}')
+          ..writeln();
+        final b = brokerFor(body.toString());
+        final turn = b.streamDetailed(
+          apiKey: 'g',
+          model: 'gemini-2.5-pro',
+          request: request,
+        );
+        expect(await turn.deltas.toList(), isEmpty);
+        final done = await turn.completion;
+        expect(done.isRefusal, isTrue);
+        expect(done.inputTokens, 12);
+      });
+
+      test('MAX_TOKENS reads as truncation', () async {
+        final body = StringBuffer()
+          ..writeln('data: ${jsonEncode({
+                'candidates': [
+                  {
+                    'content': {
+                      'parts': [
+                        {'text': 'cut'},
+                      ],
+                    },
+                    'finishReason': 'MAX_TOKENS',
+                  },
+                ],
+              })}')
+          ..writeln();
+        final b = brokerFor(body.toString());
+        final turn = b.streamDetailed(
+          apiKey: 'g',
+          model: 'gemini-2.5-pro',
+          request: request,
+        );
+        await turn.deltas.toList();
+        final done = await turn.completion;
+        expect(done.isTruncated, isTrue);
+        expect(done.model, 'gemini-2.5-pro', reason: 'falls back to requested');
+      });
+    });
+
     group('embed', () {
       test('posts batchEmbedContents and returns vectors in order', () async {
         late Map<String, Object?> sentBody;
@@ -494,6 +610,165 @@ void main() {
           ),
         );
       });
+    });
+  });
+
+  // Structured output. Before 0.6.0 `ChatRequest.jsonSchema` was dropped here
+  // in silence and the model answered in prose — the bug that abandoned a
+  // whole prompt-improvement run.
+  group('GeminiBroker structured output', () {
+    final broker = GeminiBroker();
+
+    Map<String, Object?> configFor(ChatRequest request) =>
+        broker.buildPayload(request)['generationConfig']!
+            as Map<String, Object?>;
+
+    test('a json schema becomes responseMimeType plus a translated schema', () {
+      final config = configFor(
+        const ChatRequest(
+          system: 's',
+          messages: [AiMessage.user('score this')],
+          jsonSchema: kJudgeJsonSchema,
+        ),
+      );
+      expect(config['responseMimeType'], 'application/json');
+      expect(config['responseSchema'], toGeminiSchema(kJudgeJsonSchema));
+    });
+
+    test('no additionalProperties survives into responseSchema', () {
+      final config = configFor(
+        const ChatRequest(
+          system: 's',
+          messages: [],
+          jsonSchema: kJudgeJsonSchema,
+        ),
+      );
+      expect(
+        allKeysDeep(config['responseSchema']),
+        isNot(contains('additionalProperties')),
+        reason: 'Gemini 400s on it — the whole reason a translation exists',
+      );
+    });
+
+    test('nullable unions arrive as the nullable flag', () {
+      final schema = configFor(
+        const ChatRequest(
+          system: 's',
+          messages: [],
+          jsonSchema: kJudgeJsonSchema,
+        ),
+      )['responseSchema']! as Map<String, Object?>;
+      final properties = schema['properties']! as Map<String, Object?>;
+      final prompt = properties['improved_prompt']! as Map<String, Object?>;
+      expect(prompt['type'], 'string');
+      expect(prompt['nullable'], isTrue);
+    });
+
+    test('neither field is sent when no schema was asked for', () {
+      final config = configFor(const ChatRequest(system: 's', messages: []));
+      expect(config.containsKey('responseMimeType'), isFalse);
+      expect(config.containsKey('responseSchema'), isFalse);
+    });
+
+    test('an untranslatable schema still forces JSON, unconstrained', () {
+      const recursive = {
+        'type': 'object',
+        r'$defs': {
+          'node': {
+            'type': 'object',
+            'properties': {
+              'child': {r'$ref': r'#/$defs/node'},
+            },
+          },
+        },
+        'properties': {
+          'root': {r'$ref': r'#/$defs/node'},
+        },
+      };
+      final config = configFor(
+        const ChatRequest(system: 's', messages: [], jsonSchema: recursive),
+      );
+      expect(config['responseMimeType'], 'application/json');
+      expect(
+        config.containsKey('responseSchema'),
+        isFalse,
+        reason: 'unconstrained JSON beats both prose and a 400',
+      );
+    });
+
+    test('generateContent puts it on the wire', () async {
+      late Map<String, Object?> sent;
+      final b = GeminiBroker(
+        client: MockClient((req) async {
+          sent = jsonDecode(req.body) as Map<String, Object?>;
+          return Response(
+            jsonEncode({
+              'candidates': [
+                {
+                  'content': {
+                    'parts': [
+                      {'text': '{"changelog":"none"}'},
+                    ],
+                  },
+                },
+              ],
+            }),
+            200,
+          );
+        }),
+      );
+      await b.chat(
+        apiKey: 'g',
+        model: 'gemini-2.5-pro',
+        request: const ChatRequest(
+          system: '',
+          messages: [AiMessage.user('score')],
+          jsonSchema: kJudgeJsonSchema,
+        ),
+      );
+      final config = sent['generationConfig']! as Map<String, Object?>;
+      expect(config['responseMimeType'], 'application/json');
+      expect(config['responseSchema'], toGeminiSchema(kJudgeJsonSchema));
+    });
+
+    test('streamGenerateContent sends the same generationConfig', () async {
+      late Map<String, Object?> sent;
+      final b = GeminiBroker(
+        client: MockClient.streaming((req, bodyStream) async {
+          sent = jsonDecode(await bodyStream.bytesToString())
+              as Map<String, Object?>;
+          return StreamedResponse(
+            Stream<List<int>>.value(
+              utf8.encode('data: ${jsonEncode({
+                    'candidates': [
+                      {
+                        'content': {
+                          'parts': [
+                            {'text': '{}'},
+                          ],
+                        },
+                      },
+                    ],
+                  })}\n\n'),
+            ),
+            200,
+          );
+        }),
+      );
+      await b
+          .stream(
+            apiKey: 'g',
+            model: 'gemini-2.5-pro',
+            request: const ChatRequest(
+              system: '',
+              messages: [AiMessage.user('score')],
+              jsonSchema: kJudgeJsonSchema,
+            ),
+          )
+          .toList();
+      final config = sent['generationConfig']! as Map<String, Object?>;
+      expect(config['responseMimeType'], 'application/json');
+      expect(config['responseSchema'], toGeminiSchema(kJudgeJsonSchema));
     });
   });
 }

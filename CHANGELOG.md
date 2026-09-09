@@ -1,5 +1,97 @@
 # Changelog
 
+## 0.6.1
+
+- fix: the chat request timeout was raised to 120s in 0.4.0 for `AnthropicBroker`
+  only. `GeminiBroker` and `OpenAiBroker` kept 30s, which is not enough for a
+  reasoning model returning structured output over a large system prompt — a
+  judge call measured 21.5s on a synthetic input and timed out on a real one,
+  surfacing as a bare `TimeoutException` with nothing pointing at the cause.
+  Both are now 120s. `GoogleTranslateBroker` stays at 30s; it does no reasoning.
+
+## 0.6.0
+
+**`ChatRequest.jsonSchema` was honoured by exactly one provider.** Anthropic
+sent it as `output_config.format`; `GeminiBroker` and `OpenAiBroker` dropped it
+without a word and answered in prose. A caller that asked for constrained JSON
+and switched provider found out at the parse site, far from the cause — in
+production, a prompt-improvement judge returned
+`Here is the score for your input:\n\n**Item 1**...` instead of JSON and the
+run was abandoned. Silently ignoring a constraint the caller asked for is the
+worst of the available behaviours; all three brokers now honour it.
+
+- feat: `GeminiBroker` sends `generationConfig.responseMimeType:
+  'application/json'` plus a translated `responseSchema`. Gemini takes an
+  **OpenAPI 3.0 subset**, not JSON Schema: forwarding the caller's schema
+  unchanged is a 400 (`Unknown name "additionalProperties" at
+  'generation_config.response_schema'`).
+- feat: `OpenAiBroker` sends `response_format: {type: 'json_schema',
+  json_schema: {name: 'response', strict: true, schema: …}}`.
+- feat: `toGeminiSchema` / `toOpenAiStrictSchema` (new
+  `lib/src/chat/json_schema.dart`) are the pure translation functions behind
+  both, exported from the package so a caller can inspect exactly what a
+  provider will be sent. The two providers want *opposite* things from the
+  same schema, which is why this could not be a passthrough:
+  Gemini rejects `additionalProperties`, OpenAI's strict mode **requires** it
+  set to `false` on every object along with every property named in
+  `required` — added where the caller left them out rather than assumed.
+- feat: `toGeminiSchema` also drops the meta keywords (`$schema`, `$id`,
+  `$defs`, `definitions`), inlines a local `$ref`, drops validation keywords
+  the subset has no field for (`minLength`, `pattern`, `maximum`, …), and
+  rewrites a nullable union — `type: ['string', 'null']` — as
+  `type: 'string'` plus `nullable: true`.
+- feat: when no safe translation exists — a recursive or unresolvable `$ref`,
+  a genuine `['string', 'number']` union — `toGeminiSchema` returns null and
+  the broker sends `responseMimeType` on its own. Unconstrained JSON is still
+  JSON, and beats both prose and a rejected request.
+- feat: `GeminiBroker.buildPayload` and `OpenAiBroker.buildPayload` are now
+  `@visibleForTesting` rather than private, matching `AnthropicBroker`. Both
+  streaming and non-streaming paths go through them, so structured output
+  cannot diverge between `chat` and `stream`.
+- **Behaviour change.** A request carrying `jsonSchema` now produces a
+  different wire payload on Gemini and OpenAI than it did in 0.5.0, and the
+  model's reply changes shape with it: JSON where prose used to come back.
+  Callers that were compensating — stripping code fences, hunting for the
+  first `{`, retrying on a parse failure — can drop that scaffolding, and
+  should check any code that assumed prose. Anthropic is untouched; its
+  payload is byte-for-byte what 0.5.0 sent.
+
+## 0.5.0
+
+**A streamed turn can now be billed.** `ChatBroker.stream` yields text and
+throws the rest away, so anything that streams had no way to record token
+usage or tell a refusal from a normal end. `streamDetailed` is the streaming
+counterpart to 0.4.0's `chatDetailed`.
+
+- feat: `ChatBroker.streamDetailed` returns a `StreamedCompletion` — a
+  `Stream<String> deltas` that behaves exactly like `stream`, plus a
+  `Future<AiCompletion> completion` that resolves when the stream ends with
+  the usage, the serving model and the stop reason. Nothing is buffered: the
+  text still arrives token by token.
+- feat: `StreamedCompletion.fromDeltas` wraps any plain delta stream with a
+  best-effort completion (accumulated text, zero tokens, `end_turn`). It backs
+  the default `streamDetailed`, so every existing `ChatBroker` keeps working
+  untouched.
+- feat: `AnthropicBroker.streamDetailed` parses the accounting the SSE stream
+  already carried and this package used to discard — `message_start` for the
+  input and cache token counts and the model that actually served the turn,
+  `message_delta` for the stop reason and the final output count. A
+  mid-stream `refusal` now surfaces as `AiCompletion.isRefusal` instead of
+  looking like a short reply.
+- feat: `GeminiBroker.streamDetailed` reads `usageMetadata`
+  (`promptTokenCount` / `candidatesTokenCount` / `cachedContentTokenCount`)
+  and maps `finishReason` onto `AiStopReason` — every safety stop
+  (`SAFETY`, `RECITATION`, `BLOCKLIST`, `PROHIBITED_CONTENT`, …) reads as a
+  refusal, `MAX_TOKENS` as truncation.
+- fix: cancelling a streamed turn mid-reply used to hang the consumer's own
+  `subscription.cancel()` when no further bytes happened to arrive. Both
+  streaming brokers now park on a yield point, so a cancel is acknowledged
+  immediately — and `completion` settles with the part that did arrive.
+- **Note for implementors.** `ChatBroker` gained a member. Subclasses
+  (`extends ChatBroker`) inherit the default and need no change; classes that
+  `implements ChatBroker` — hand-written fakes, mostly — must add a
+  `streamDetailed`, which `StreamedCompletion.fromDeltas` makes a one-liner.
+
 ## 0.4.0
 
 **Breaking, and it fixes a hard outage.** `ChatRequest.temperature` is now

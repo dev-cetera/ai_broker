@@ -54,6 +54,8 @@ abstract class ChatBroker implements AiBroker {
   Future<String> complete({ ... });                                    // single-shot
   Future<String> chat({ ... ChatRequest request });                    // multi-turn
   Stream<String> stream({ ... ChatRequest request });                  // token-by-token
+  Future<AiCompletion> chatDetailed({ ... ChatRequest request });      // + usage / stop reason
+  StreamedCompletion streamDetailed({ ... ChatRequest request });      // streamed, + usage
 }
 
 abstract class EmbedBroker implements AiBroker {
@@ -120,8 +122,79 @@ void main() async {
   await for (final chunk in stream) {
     stdout.write(chunk);
   }
+
+  // Streaming, with the accounting the stream already carries. Same text,
+  // same timing — plus what the turn cost and why it ended.
+  final turn = broker.streamDetailed(
+    apiKey: apiKey,
+    model: 'claude-sonnet-4-6',
+    request: const ChatRequest(
+      system: 'You write short prose.',
+      messages: [AiMessage.user('Describe an ocean sunset.')],
+    ),
+  );
+  await for (final delta in turn.deltas) {
+    stdout.write(delta);
+  }
+  final done = await turn.completion;         // resolves when the stream ends
+  if (done.isRefusal) stderr.writeln('the model declined');
+  print('\n${done.inputTokens} in / ${done.outputTokens} out on ${done.model}');
 }
 ```
+
+## Structured output (0.6.0+)
+
+Set `ChatRequest.jsonSchema` and the reply comes back as valid JSON by
+construction — no code fences to strip, no brace-hunting, no
+retry-on-parse loop. **Every chat broker honours it**, each in its own
+dialect:
+
+| Provider | Wire field |
+|----------|-----------|
+| `AnthropicBroker` | `output_config.format` — the schema verbatim |
+| `OpenAiBroker` | `response_format` — `strict: true`, via `toOpenAiStrictSchema` |
+| `GeminiBroker` | `generationConfig.responseMimeType` + `responseSchema`, via `toGeminiSchema` |
+
+```dart
+const schema = {
+  'type': 'object',
+  'additionalProperties': false,
+  'required': ['verdict', 'reason'],
+  'properties': {
+    'verdict': {'type': 'string', 'enum': ['PASS', 'FAIL']},
+    'reason': {'type': ['string', 'null']},
+  },
+};
+
+final raw = await broker.chat(
+  apiKey: apiKey,
+  model: model,
+  request: const ChatRequest(
+    system: 'You score answers.',
+    messages: [AiMessage.user('Is 2 + 2 = 5?')],
+    jsonSchema: schema,
+  ),
+);
+final scored = jsonDecode(raw) as Map<String, Object?>;   // safe on all three
+```
+
+Write it once as ordinary JSON Schema; the package reconciles the
+providers, which disagree in *opposite* directions — Gemini 400s on
+`additionalProperties`, OpenAI's strict mode requires it (and requires
+every property to appear in `required`). The translations are pure
+functions you can call yourself to see exactly what will be sent:
+
+```dart
+toGeminiSchema(schema);       // OpenAPI 3.0 subset, or null if inexpressible
+toOpenAiStrictSchema(schema); // strict-mode JSON Schema
+```
+
+Portable subset: objects with `properties` / `required` /
+`additionalProperties: false`, arrays with `items`, `enum` for closed string
+sets, and `type: ['string', 'null']` for nullable fields. Value bounds
+(`minLength`, `maximum`, `pattern`, …) are dropped on the way to Gemini —
+state those in the prompt. A schema Gemini cannot express at all (a recursive
+`$ref`, a `['string', 'number']` union) still yields JSON, just unconstrained.
 
 ## Library quick start — RAG
 

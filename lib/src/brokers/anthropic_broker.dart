@@ -174,32 +174,149 @@ class AnthropicBroker extends ChatBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
-  }) async* {
-    final body = jsonEncode(buildPayload(model, request, stream: true));
-    final byteStream = await openSsePost(
-      uri: Uri.parse('$baseUrl/messages'),
-      headers: {
-        ..._headers(apiKey),
-        'Accept': 'text/event-stream',
-      },
-      body: body,
-      providerLabel: 'Anthropic',
-      client: _http,
+  }) =>
+      streamDetailed(apiKey: apiKey, model: model, request: request).deltas;
+
+  @override
+  StreamedCompletion streamDetailed({
+    required String apiKey,
+    required String model,
+    required ChatRequest request,
+  }) {
+    final completer = Completer<AiCompletion>();
+    // A caller that only drains the text — every `stream()` call — already
+    // sees a failure on the stream itself; without a listener here the same
+    // error would also surface as an unhandled async error.
+    completer.future.ignore();
+    return StreamedCompletion(
+      deltas: _streamDeltas(
+        apiKey: apiKey,
+        model: model,
+        request: request,
+        completer: completer,
+      ),
+      completion: completer.future,
     );
+  }
+
+  /// The SSE read loop behind [stream] and [streamDetailed]. Yields text as
+  /// it arrives — nothing is held back — and completes [completer] from the
+  /// bookkeeping events once the message ends.
+  Stream<String> _streamDeltas({
+    required String apiKey,
+    required String model,
+    required ChatRequest request,
+    required Completer<AiCompletion> completer,
+  }) async* {
+    final buf = StringBuffer();
+    var servingModel = model;
+    var stopReason = AiStopReason.unknown;
+    var inputTokens = 0;
+    var outputTokens = 0;
+    var cacheReadInputTokens = 0;
+    var cacheCreationInputTokens = 0;
+
+    // Usage arrives twice and in pieces: `message_start` knows the input and
+    // cache counts, `message_delta` knows the final output count. Take each
+    // key only when the event actually carries it, so the later event can't
+    // zero out what the earlier one reported.
+    void readUsage(Object? raw) {
+      if (raw is! Map<String, Object?>) return;
+      int? at(String key) => (raw[key] as num?)?.toInt();
+      inputTokens = at('input_tokens') ?? inputTokens;
+      outputTokens = at('output_tokens') ?? outputTokens;
+      cacheReadInputTokens =
+          at('cache_read_input_tokens') ?? cacheReadInputTokens;
+      cacheCreationInputTokens =
+          at('cache_creation_input_tokens') ?? cacheCreationInputTokens;
+    }
+
     // Anthropic stream events:
+    //  - message_start       → { message: { model, usage } }
     //  - content_block_delta → { delta: { type: 'text_delta', text } }
-    //  - message_stop → end of stream
-    // Other events (message_start, ping, etc.) are ignored here.
-    await for (final event in decodeSseStream(byteStream)) {
-      if (event.event == 'message_stop') return;
-      if (event.event != 'content_block_delta') continue;
-      if (event.data.isEmpty) continue;
+    //  - message_delta       → { delta: { stop_reason }, usage }
+    //  - message_stop        → end of stream
+    // Other events (ping, content_block_start/stop, etc.) are ignored.
+    Iterable<String> consume(SseEvent event) sync* {
+      final name = event.event;
+      if (event.data.isEmpty) return;
+      // Decode only what we act on. An unrecognised event — a gateway's own
+      // keep-alive, say — may not carry JSON at all.
+      if (name != 'message_start' &&
+          name != 'content_block_delta' &&
+          name != 'message_delta') {
+        return;
+      }
       final json = jsonDecode(event.data) as Map<String, Object?>;
-      final delta = json['delta'] as Map<String, Object?>?;
-      if (delta == null) continue;
-      if (delta['type'] != 'text_delta') continue;
-      final text = delta['text'] as String?;
-      if (text != null && text.isNotEmpty) yield text;
+      if (name == 'message_start') {
+        final message = json['message'] as Map<String, Object?>?;
+        if (message == null) return;
+        // The serving model can differ from the one that was requested.
+        servingModel = message['model'] as String? ?? servingModel;
+        readUsage(message['usage']);
+      } else if (name == 'content_block_delta') {
+        final delta = json['delta'] as Map<String, Object?>?;
+        if (delta == null) return;
+        if (delta['type'] != 'text_delta') return;
+        final text = delta['text'] as String?;
+        if (text == null || text.isEmpty) return;
+        buf.write(text);
+        yield text;
+      } else if (name == 'message_delta') {
+        // The one event that says *why* the turn ended — including
+        // `refusal`, which otherwise looks exactly like a short reply.
+        final delta = json['delta'] as Map<String, Object?>?;
+        if (delta != null) {
+          stopReason = AiStopReason.fromWire(delta['stop_reason'] as String?);
+        }
+        readUsage(json['usage']);
+      }
+    }
+
+    try {
+      final body = jsonEncode(buildPayload(model, request, stream: true));
+      final byteStream = await openSsePost(
+        uri: Uri.parse('$baseUrl/messages'),
+        headers: {
+          ..._headers(apiKey),
+          'Accept': 'text/event-stream',
+        },
+        body: body,
+        providerLabel: 'Anthropic',
+        client: _http,
+      );
+      // `yield*` rather than `await for`, so a consumer that cancels
+      // mid-reply is acknowledged at once and the `finally` below still
+      // runs. Stream errors bypass the enclosing catch as a result, hence
+      // the `handleError` hop.
+      yield* decodeSseStream(byteStream)
+          .takeWhile((event) => event.event != 'message_stop')
+          .expand(consume)
+          .handleError((Object e, StackTrace st) {
+        if (!completer.isCompleted) completer.completeError(e, st);
+        Error.throwWithStackTrace(e, st);
+      });
+    } catch (e, st) {
+      // Connection failures and non-2xx responses, which throw before the
+      // first event arrives.
+      if (!completer.isCompleted) completer.completeError(e, st);
+      rethrow;
+    } finally {
+      // Also the cancellation path: a consumer that walks away mid-reply gets
+      // a completion for the part that did arrive rather than a hung future.
+      if (!completer.isCompleted) {
+        completer.complete(
+          AiCompletion(
+            text: buf.toString().trim(),
+            model: servingModel,
+            stopReason: stopReason,
+            inputTokens: inputTokens,
+            outputTokens: outputTokens,
+            cacheReadInputTokens: cacheReadInputTokens,
+            cacheCreationInputTokens: cacheCreationInputTokens,
+          ),
+        );
+      }
     }
   }
 

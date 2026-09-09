@@ -17,6 +17,8 @@ import 'package:http/http.dart';
 import 'package:http/testing.dart';
 import 'package:test/test.dart';
 
+import '../support/judge_schema.dart';
+
 /// Guards the request shape against the parameters current Claude models
 /// reject. Each of these was a 400 in production before 0.4.0.
 void main() {
@@ -82,6 +84,59 @@ void main() {
       final oc = payload['output_config']! as Map<String, Object?>;
       expect(oc['effort'], 'high');
       expect(oc['format'], {'type': 'json_schema', 'schema': schema});
+    });
+
+    // 0.6.0 taught GeminiBroker and OpenAiBroker to honour
+    // `ChatRequest.jsonSchema`, each in its own dialect. Anthropic already
+    // spoke plain JSON Schema, so its wire shape must not have moved.
+    test('the judge schema is forwarded verbatim, untranslated', () {
+      final payload = broker.buildPayload(
+        'claude-opus-5',
+        const ChatRequest(
+          system: 's',
+          messages: [],
+          jsonSchema: kJudgeJsonSchema,
+        ),
+        stream: false,
+      );
+      final format = (payload['output_config']!
+          as Map<String, Object?>)['format']! as Map<String, Object?>;
+      expect(format, {'type': 'json_schema', 'schema': kJudgeJsonSchema});
+      expect(
+        identical(format['schema'], kJudgeJsonSchema),
+        isTrue,
+        reason: 'not even a defensive copy — the schema goes through as given',
+      );
+      // Neither of the rewrites the other two providers need happened here:
+      // `additionalProperties` survives (Gemini strips it) and the nullable
+      // unions stay unions (Gemini turns them into a `nullable` flag).
+      expect(allKeysDeep(format['schema']), contains('additionalProperties'));
+      expect(allKeysDeep(format['schema']), isNot(contains('nullable')));
+      final properties = (format['schema']!
+          as Map<String, Object?>)['properties']! as Map<String, Object?>;
+      expect(
+        (properties['improved_prompt']! as Map<String, Object?>)['type'],
+        ['string', 'null'],
+      );
+    });
+
+    test('the streaming payload carries the same untranslated schema', () {
+      final streamed = broker.buildPayload(
+        'claude-opus-5',
+        const ChatRequest(
+          system: 's',
+          messages: [],
+          jsonSchema: kJudgeJsonSchema,
+        ),
+        stream: true,
+      );
+      expect(streamed['stream'], isTrue);
+      expect(
+        (streamed['output_config']! as Map<String, Object?>)['format'],
+        {'type': 'json_schema', 'schema': kJudgeJsonSchema},
+      );
+      expect(streamed.containsKey('response_format'), isFalse);
+      expect(streamed.containsKey('generationConfig'), isFalse);
     });
 
     test('output_config is absent entirely when nothing needs it', () {
