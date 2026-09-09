@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.4.0
+
+**Breaking, and it fixes a hard outage.** `ChatRequest.temperature` is now
+`double?` and defaults to **null, meaning the field is not sent**. Every
+current Claude model — Opus 5, Sonnet 5, and the whole 4.6+ family — rejects
+`temperature` and `top_p` with a 400, so the previous unconditional
+`temperature: 0.3` made this package unable to call any of them. Callers that
+never set a temperature are fixed by upgrading; callers that pass one
+explicitly keep the old behaviour and should drop it unless they target an
+older model or OpenAI/Gemini.
+
+- feat: `AiEffort` (`low` … `max`) — the modern replacement for the
+  temperature knob. Sent as `output_config.effort`.
+- feat: `ChatRequest.jsonSchema` constrains a reply to a JSON Schema via
+  `output_config.format`. Removes the need for assistant prefill (also
+  rejected by current models), code-fence stripping, and retry-on-parse loops.
+- feat: `ChatRequest.cacheSystem` marks the system prompt as a cacheable
+  prefix. Worth it whenever the same system text repeats across calls.
+- feat: `ChatBroker.chatDetailed` returns an `AiCompletion` with the text plus
+  token accounting (`inputTokens`, `outputTokens`, `cacheReadInputTokens`,
+  `cacheCreationInputTokens`), the serving `model`, and an `AiStopReason`.
+  It has a default implementation that delegates to `chat`, so existing
+  `ChatBroker` implementations keep compiling.
+- feat: `AiStopReason`, including `refusal`. A refusal arrives as an HTTP 200
+  with empty content; `chatDetailed` reports it as a completion instead of
+  throwing, so a chat UI can show a fallback and a scoring loop can record a
+  skip.
+- feat: `AnthropicBroker.baseUrl`, settable per instance or via the
+  `ANTHROPIC_BASE_URL` environment variable, for proxies, gateways and local
+  test doubles.
+- feat: `AnthropicBroker.buildPayload` is visible for testing, so request
+  shape can be asserted without a network call.
+- fix: the Anthropic request timeout was 30s, which truncated long
+  structured-output calls. Now 120s.
+- docs: `example/modern_claude_example.dart` demonstrates the correct shape.
+
 ## 0.3.0
 
 **Breaking.** `AiBroker` no longer carries `chat` / `stream` / `complete` /

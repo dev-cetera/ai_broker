@@ -154,6 +154,9 @@ void main() {
         ]);
       });
 
+      // An empty content list and an all-whitespace reply are the same
+      // failure to a caller of `chat`; `chatDetailed` is the API that
+      // distinguishes them (a refusal returns empty text, not an exception).
       test('throws when content list is empty', () async {
         final b = AnthropicBroker(
           client: MockClient(
@@ -168,7 +171,7 @@ void main() {
           ),
           throwsA(
             isA<AiBrokerException>()
-                .having((e) => e.message, 'message', contains('no content')),
+                .having((e) => e.message, 'message', contains('empty text')),
           ),
         );
       });

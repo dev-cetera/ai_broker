@@ -23,7 +23,7 @@ abstract class ChatBroker implements AiBroker {
     required String model,
     required String system,
     required String user,
-    double temperature = 0.3,
+    double? temperature,
     int maxTokens = 2048,
   }) =>
       chat(
@@ -43,6 +43,26 @@ abstract class ChatBroker implements AiBroker {
     required String model,
     required ChatRequest request,
   });
+
+  /// Like [chat], but returns token accounting and the stop reason alongside
+  /// the text. Prefer this anywhere the call costs money in a loop, or where
+  /// a refusal needs handling rather than an exception.
+  ///
+  /// The default implementation delegates to [chat] and reports zero tokens,
+  /// so providers that expose no usage data still satisfy the interface.
+  /// Override it wherever the provider does return accounting.
+  Future<AiCompletion> chatDetailed({
+    required String apiKey,
+    required String model,
+    required ChatRequest request,
+  }) async {
+    final text = await chat(apiKey: apiKey, model: model, request: request);
+    return AiCompletion(
+      text: text,
+      model: model,
+      stopReason: AiStopReason.endTurn,
+    );
+  }
 
   /// Token-streaming chat. Each event is an *incremental* delta —
   /// concatenating every event yields the same string [chat] would

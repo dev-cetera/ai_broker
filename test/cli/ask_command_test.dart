@@ -38,7 +38,7 @@ class _AskFake implements ChatBroker, EmbedBroker {
     required String model,
     required String system,
     required String user,
-    double temperature = 0.3,
+    double? temperature,
     int maxTokens = 2048,
   }) async =>
       '';
@@ -84,6 +84,18 @@ class _AskFake implements ChatBroker, EmbedBroker {
     yield 'love ';
     yield 'to nap.';
   }
+
+  @override
+  Future<AiCompletion> chatDetailed({
+    required String apiKey,
+    required String model,
+    required ChatRequest request,
+  }) async =>
+      AiCompletion(
+        text: await chat(apiKey: apiKey, model: model, request: request),
+        model: model,
+        stopReason: AiStopReason.endTurn,
+      );
 }
 
 void main() {
