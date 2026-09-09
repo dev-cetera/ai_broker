@@ -83,6 +83,27 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
     required String model,
     required ChatRequest request,
   }) async {
+    final result = await chatDetailed(
+      apiKey: apiKey,
+      model: model,
+      request: request,
+    );
+    if (result.text.isEmpty) {
+      // A turn that is nothing but `functionCall` parts has no text, and
+      // `chat` has no way to return a call — so say which method does.
+      throw AiBrokerException(
+        toolNoTextMessage('Gemini', 'empty text', result.toolCalls),
+      );
+    }
+    return result.text;
+  }
+
+  @override
+  Future<AiCompletion> chatDetailed({
+    required String apiKey,
+    required String model,
+    required ChatRequest request,
+  }) async {
     final uri = Uri.parse('$_baseUrl/models/$model:generateContent');
     final body = jsonEncode(buildPayload(request));
     final res = await retryRequest(
@@ -99,7 +120,32 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
       providerLabel: 'Gemini',
     );
     final json = jsonDecode(res.body) as Map<String, Object?>;
-    return _extractText(json);
+    // Throws on an empty `candidates` array, which is a real failure at any
+    // detail level — there is no turn to report.
+    final text = _extractText(json, allowEmpty: true, requireCandidates: true);
+    final toolCalls = <AiToolCall>[];
+    collectToolCalls(json, toolCalls);
+    final usage = json['usageMetadata'] as Map<String, Object?>? ?? const {};
+    int count(String key) => (usage[key] as num?)?.toInt() ?? 0;
+    final candidates = json['candidates'] as List<Object?>? ?? const [];
+    final finish = candidates.isEmpty
+        ? null
+        : (candidates.first as Map<String, Object?>)['finishReason'] as String?;
+    return AiCompletion(
+      text: text.trim(),
+      model: json['modelVersion'] as String? ?? model,
+      // Gemini reports `STOP` even when the whole turn is a function call —
+      // it has no `tool_use` finish reason to report. The calls themselves are
+      // the only signal, so they are what decides here. Anthropic and OpenAI
+      // both say so on the wire and are taken at their word.
+      stopReason: toolCalls.isNotEmpty
+          ? AiStopReason.toolUse
+          : _stopReasonFrom(finish ?? ''),
+      inputTokens: count('promptTokenCount'),
+      outputTokens: count('candidatesTokenCount'),
+      cacheReadInputTokens: count('cachedContentTokenCount'),
+      toolCalls: toolCalls,
+    );
   }
 
   @override
@@ -147,6 +193,10 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
     var inputTokens = 0;
     var outputTokens = 0;
     var cachedTokens = 0;
+    // Gemini streams a `functionCall` part whole rather than in JSON
+    // fragments, so each chunk contributes zero or more finished calls and
+    // they simply accumulate in arrival order.
+    final toolCalls = <AiToolCall>[];
 
     Iterable<String> consume(SseEvent event) sync* {
       if (event.data.isEmpty) return;
@@ -165,6 +215,7 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
         final finish = first['finishReason'] as String?;
         if (finish != null) stopReason = _stopReasonFrom(finish);
       }
+      collectToolCalls(json, toolCalls);
       final text = _extractText(json, allowEmpty: true);
       if (text.isEmpty) return;
       buf.write(text);
@@ -209,10 +260,14 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
           AiCompletion(
             text: buf.toString().trim(),
             model: servingModel,
-            stopReason: stopReason,
+            // Same normalisation as `chatDetailed`: Gemini's `finishReason`
+            // never says `tool_use`, so the calls are what decides.
+            stopReason:
+                toolCalls.isNotEmpty ? AiStopReason.toolUse : stopReason,
             inputTokens: inputTokens,
             outputTokens: outputTokens,
             cacheReadInputTokens: cachedTokens,
+            toolCalls: [...toolCalls],
           ),
         );
       }
@@ -243,10 +298,14 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
   /// Pulls text out of either a `generateContent` response or a
   /// `streamGenerateContent` chunk. They share the same `candidates →
   /// content → parts → text` shape, so one extractor handles both.
-  String _extractText(Map<String, Object?> json, {bool allowEmpty = false}) {
+  String _extractText(
+    Map<String, Object?> json, {
+    bool allowEmpty = false,
+    bool requireCandidates = false,
+  }) {
     final candidates = json['candidates'] as List<Object?>? ?? const [];
     if (candidates.isEmpty) {
-      if (allowEmpty) return '';
+      if (allowEmpty && !requireCandidates) return '';
       throw const AiBrokerException('Gemini returned no candidates.');
     }
     final first = candidates.first as Map<String, Object?>;
@@ -340,10 +399,18 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
   /// [toGeminiSchema] first. When no safe translation exists that returns
   /// null and only the mime type is sent: unconstrained JSON is still JSON,
   /// which beats both prose and a rejected request.
+  /// [ChatRequest.tools] rides in a **single** `tools` entry holding every
+  /// declaration — `tools: [{functionDeclarations: [...]}]` — not one entry
+  /// per tool the way the other two providers spell it. `parameters` takes the
+  /// same OpenAPI-3 subset as `responseSchema`, so it goes through
+  /// [toGeminiSchema] as well; a schema with no safe translation is sent
+  /// without `parameters` rather than 400ing the whole request.
   @visibleForTesting
   Map<String, Object?> buildPayload(ChatRequest req) {
     final schema = req.jsonSchema;
     final responseSchema = schema == null ? null : toGeminiSchema(schema);
+    final tools = req.tools;
+    final hasTools = tools != null && tools.isNotEmpty;
     return {
       if (req.system.isNotEmpty)
         'systemInstruction': {
@@ -351,15 +418,25 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
             {'text': req.system},
           ],
         },
-      'contents': [
-        for (final m in req.messages)
+      'contents': _renderContents(req.messages),
+      if (hasTools)
+        'tools': [
           {
-            'role': m.role == AiRole.user ? 'user' : 'model',
-            'parts': [
-              {'text': m.content},
+            'functionDeclarations': [
+              for (final tool in tools)
+                {
+                  'name': tool.name,
+                  'description': tool.description,
+                  if (toGeminiSchema(tool.inputSchema) case final params?)
+                    'parameters': params,
+                },
             ],
           },
-      ],
+        ],
+      if (hasTools && req.toolChoice != null)
+        'toolConfig': {
+          'functionCallingConfig': {'mode': _toolMode(req.toolChoice!)},
+        },
       'generationConfig': {
         'temperature': req.temperature,
         'maxOutputTokens': req.maxTokens,
@@ -367,5 +444,140 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
         if (responseSchema != null) 'responseSchema': responseSchema,
       },
     };
+  }
+
+  /// Gemini's modes are upper-case, and "you must call something" is `ANY`.
+  static String _toolMode(AiToolChoice choice) {
+    switch (choice) {
+      case AiToolChoice.auto:
+        return 'AUTO';
+      case AiToolChoice.none:
+        return 'NONE';
+      case AiToolChoice.required:
+        return 'ANY';
+    }
+  }
+
+  /// Renders the turn history into Gemini's `contents`.
+  ///
+  /// Plain turns keep the single-`text`-part shape they have always had, so a
+  /// request without tools is byte-for-byte what earlier versions sent. A
+  /// tool-use turn becomes `functionCall` parts on a `model` content; results
+  /// become `functionResponse` parts, and **consecutive results are coalesced
+  /// into one `user` content** because they answer one model turn.
+  ///
+  /// The wrinkle is naming: `functionResponse` is keyed by function *name*,
+  /// not by call id, and Gemini never sent an id to begin with. The name is
+  /// recovered from the assistant turn that asked for the call — which has to
+  /// be in the history anyway — and failing that, decoded back out of the
+  /// synthesised id.
+  static List<Map<String, Object?>> _renderContents(List<AiMessage> messages) {
+    final out = <Map<String, Object?>>[];
+    var i = 0;
+    while (i < messages.length) {
+      final message = messages[i];
+      if (message.isToolResult) {
+        final parts = <Object?>[];
+        while (i < messages.length && messages[i].isToolResult) {
+          final result = messages[i];
+          parts.add({
+            'functionResponse': {
+              'name': _toolNameFor(result.toolCallId!, messages),
+              // Gemini takes an arbitrary object here. Keying an error
+              // differently is the only way to say "this failed" on a wire
+              // format with no `is_error` flag.
+              'response': result.isError
+                  ? {'error': result.content}
+                  : {'result': result.content},
+            },
+          });
+          i++;
+        }
+        out.add({'role': 'user', 'parts': parts});
+        continue;
+      }
+      if (message.toolCalls.isNotEmpty) {
+        out.add({
+          'role': 'model',
+          'parts': <Object?>[
+            if (message.content.isNotEmpty) {'text': message.content},
+            for (final call in message.toolCalls)
+              {
+                'functionCall': {'name': call.name, 'args': call.arguments},
+                // Echoed verbatim: Gemini 3.x rejects a continuation whose
+                // functionCall part has lost its signature.
+                if (call.providerSignature != null)
+                  'thoughtSignature': call.providerSignature,
+              },
+          ],
+        });
+        i++;
+        continue;
+      }
+      out.add({
+        'role': message.role == AiRole.user ? 'user' : 'model',
+        'parts': [
+          {'text': message.content},
+        ],
+      });
+      i++;
+    }
+    return out;
+  }
+
+  /// The id [AiToolCall.id] carries for a Gemini call.
+  ///
+  /// Gemini's `functionCall` has no id field, and the rest of this package —
+  /// and every caller routing results back — is built around one. The id is
+  /// derived from the call's position in the turn and the function name, so it
+  /// is stable for a given response and carries enough to reconstruct the name
+  /// when the history is not available to look it up in.
+  static String syntheticToolCallId(int index, String name) =>
+      'call_${index}_$name';
+
+  static final _syntheticId = RegExp(r'^call_\d+_(.+)$');
+
+  /// Recovers the function name a result is answering: first from the calls in
+  /// the history, then from the shape [syntheticToolCallId] minted. An id from
+  /// somewhere else entirely is passed through as the name — wrong, but
+  /// visibly wrong in the provider's error rather than silently empty.
+  static String _toolNameFor(String toolCallId, List<AiMessage> messages) {
+    for (final message in messages) {
+      for (final call in message.toolCalls) {
+        if (call.id == toolCallId) return call.name;
+      }
+    }
+    return _syntheticId.firstMatch(toolCallId)?.group(1) ?? toolCallId;
+  }
+
+  /// Appends every `functionCall` part in a response — or a stream chunk — to
+  /// [into], minting ids from the running length so two calls in one turn stay
+  /// distinguishable.
+  @visibleForTesting
+  static void collectToolCalls(
+    Map<String, Object?> json,
+    List<AiToolCall> into,
+  ) {
+    final candidates = json['candidates'] as List<Object?>? ?? const [];
+    if (candidates.isEmpty) return;
+    final first = candidates.first;
+    if (first is! Map<String, Object?>) return;
+    final content = first['content'] as Map<String, Object?>?;
+    final parts = content?['parts'] as List<Object?>? ?? const [];
+    for (final part in parts) {
+      if (part is! Map<String, Object?>) continue;
+      final call = part['functionCall'] as Map<String, Object?>?;
+      if (call == null) continue;
+      final name = call['name'] as String? ?? '';
+      into.add(
+        AiToolCall(
+          id: syntheticToolCallId(into.length, name),
+          name: name,
+          arguments: decodeToolArguments(call['args']),
+          // Sits beside `functionCall` on the same part, not inside it.
+          providerSignature: part['thoughtSignature'] as String?,
+        ),
+      );
+    }
   }
 }

@@ -1,5 +1,72 @@
 # Changelog
 
+## 0.7.0
+
+**Tool calling.** `AiStopReason.toolUse` has been in this package since 0.4.0
+with nothing behind it: every provider supports tools, none of them was
+reachable from here, and a model that wanted to call one came back as an empty
+reply or a bare `AiBrokerException`. It now works on all three, from one
+declaration, with the wire differences absorbed by the brokers.
+
+- feat: `AiTool({name, description, inputSchema})` declares a tool once, in
+  ordinary JSON Schema. `ChatRequest.tools` carries the list and
+  `ChatRequest.toolChoice` (`auto` / `none` / `required`) says whether the
+  model may, must, or must not call one. Both are null by default, so a
+  request that predates this sends exactly the bytes it did in 0.6.1.
+- feat: `AiCompletion.toolCalls` holds the `AiToolCall`s the model asked for —
+  `id`, `name`, and **decoded** `arguments` — with `stopReason ==
+  AiStopReason.toolUse` and `wantsTool` to say why the turn ended. Reachable
+  from `chatDetailed` and from `streamDetailed`'s `completion`; `chat` and
+  `stream` stay text-only and unchanged.
+- feat: `AiMessage.assistantToolCalls(...)` and `AiMessage.toolResult({
+  toolCallId, content, isError })` put the round trip back into the history for
+  the next turn. All three providers reject a result whose call is not in the
+  transcript above it, so both halves are needed.
+- feat: streaming assembles tool calls as they arrive. Anthropic and OpenAI
+  both dribble the arguments in as JSON fragments that parse only once
+  concatenated — keyed by block index and by slot index respectively, because
+  two calls interleave on the wire. Text deltas are untouched: a caller that
+  ignores tools sees the same stream it always did.
+- feat: the wire shapes, absorbed. Anthropic gets flat
+  `tools: [{name, description, input_schema}]` and `tool_choice: {type: …}`
+  where `required` is spelled `any`; OpenAI gets
+  `tools: [{type: 'function', function: {…}}]` and a bare-string
+  `tool_choice`; Gemini gets **one** `tools` entry holding every
+  `functionDeclarations` member, with `parameters` translated by the existing
+  `toGeminiSchema` because it takes the same OpenAPI-3 subset as
+  `responseSchema`.
+- feat: results go back in the shape each provider demands, which is where they
+  diverge most. **Anthropic requires every result for a turn in a single user
+  message** — a model that asked for three tools and got three separate
+  messages back is a 400 — so consecutive `AiMessage.toolResult`s are coalesced
+  into one. OpenAI wants the opposite: one `role: 'tool'` message per
+  `tool_call_id`. Gemini coalesces like Anthropic but keys each
+  `functionResponse` by function *name*.
+- feat: `decodeToolArguments` is the shared parser, exported so a caller can
+  see what it does. OpenAI sends `function.arguments` as a JSON **string**; it
+  is parsed, never matched against — a value holding braces and escaped quotes
+  breaks any substring approach. Anything that does not decode to an object (a
+  stream cut mid-argument) yields an empty map and the call is still reported,
+  because a call worth validating beats a call silently dropped.
+- feat: Gemini's `functionCall` has no id, so `GeminiBroker` synthesises a
+  stable one — `GeminiBroker.syntheticToolCallId(index, name)` — and recovers
+  the name from it when feeding a result back without the calling turn in hand.
+  Gemini also reports `finishReason: 'STOP'` on a turn that is nothing but
+  function calls, so `stopReason` is normalised to `toolUse` from the calls
+  themselves. Anthropic and OpenAI say so on the wire and are taken at their
+  word — a tool call truncated by `max_tokens` still reads as truncated.
+- feat: `OpenAiBroker.chatDetailed` / `streamDetailed` and
+  `GeminiBroker.chatDetailed` are now real overrides rather than the
+  zero-token defaults. They report `prompt_tokens` / `completion_tokens` /
+  `cached_tokens` (`usageMetadata` on Gemini), the serving model, and a mapped
+  stop reason — accounting the responses always carried and this package
+  discarded on two of the three providers.
+- **Behaviour change, narrow.** `chat` still returns a `String`, so a turn
+  whose whole answer is a tool call still throws — there is nothing to return.
+  The message now names the tool and points at `chatDetailed` instead of
+  reporting a bare empty reply. Nothing about a request without `tools`
+  changes; the payload is byte-for-byte what 0.6.1 sent.
+
 ## 0.6.1
 
 - fix: the chat request timeout was raised to 120s in 0.4.0 for `AnthropicBroker`

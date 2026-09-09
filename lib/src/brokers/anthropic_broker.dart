@@ -121,7 +121,10 @@ class AnthropicBroker extends ChatBroker {
       throw AiBrokerException(
         result.isRefusal
             ? 'Anthropic declined this request (stop_reason: refusal).'
-            : 'Anthropic returned empty text.',
+            // A tool-use turn carries no text on purpose — the answer is the
+            // call. `chat` has no way to return one, so say which method does
+            // rather than reporting a bare empty reply.
+            : toolNoTextMessage('Anthropic', 'empty text', result.toolCalls),
       );
     }
     return result.text;
@@ -147,10 +150,24 @@ class AnthropicBroker extends ChatBroker {
     final json = jsonDecode(res.body) as Map<String, Object?>;
     final content = json['content'] as List<Object?>? ?? const [];
     final buf = StringBuffer();
+    // One turn can hold several `tool_use` blocks interleaved with text —
+    // "let me check both cities" followed by two calls. Keep them all, in
+    // order; the caller has to answer every one of them.
+    final toolCalls = <AiToolCall>[];
     for (final block in content) {
       if (block is! Map<String, Object?>) continue;
-      if (block['type'] != 'text') continue;
-      buf.write(block['text'] as String? ?? '');
+      switch (block['type']) {
+        case 'text':
+          buf.write(block['text'] as String? ?? '');
+        case 'tool_use':
+          toolCalls.add(
+            AiToolCall(
+              id: block['id'] as String? ?? '',
+              name: block['name'] as String? ?? '',
+              arguments: decodeToolArguments(block['input']),
+            ),
+          );
+      }
     }
     final usage = json['usage'] as Map<String, Object?>? ?? const {};
     int count(String key) => (usage[key] as num?)?.toInt() ?? 0;
@@ -166,6 +183,7 @@ class AnthropicBroker extends ChatBroker {
       outputTokens: count('output_tokens'),
       cacheReadInputTokens: count('cache_read_input_tokens'),
       cacheCreationInputTokens: count('cache_creation_input_tokens'),
+      toolCalls: toolCalls,
     );
   }
 
@@ -215,6 +233,11 @@ class AnthropicBroker extends ChatBroker {
     var outputTokens = 0;
     var cacheReadInputTokens = 0;
     var cacheCreationInputTokens = 0;
+    // Tool calls arrive as a block per index: `content_block_start` names the
+    // tool, then `input_json_delta` events dribble the arguments in as JSON
+    // fragments that are only parseable once concatenated. Keyed by block
+    // index because two calls interleave on the wire.
+    final partialTools = <int, _PartialToolCall>{};
 
     // Usage arrives twice and in pieces: `message_start` knows the input and
     // cache counts, `message_delta` knows the final output count. Take each
@@ -233,16 +256,21 @@ class AnthropicBroker extends ChatBroker {
 
     // Anthropic stream events:
     //  - message_start       → { message: { model, usage } }
-    //  - content_block_delta → { delta: { type: 'text_delta', text } }
+    //  - content_block_start → { index, content_block: { type: 'tool_use',
+    //                            id, name } }
+    //  - content_block_delta → { index, delta: { type: 'text_delta', text } }
+    //                        | { index, delta: { type: 'input_json_delta',
+    //                            partial_json } }
     //  - message_delta       → { delta: { stop_reason }, usage }
     //  - message_stop        → end of stream
-    // Other events (ping, content_block_start/stop, etc.) are ignored.
+    // Other events (ping, content_block_stop, etc.) are ignored.
     Iterable<String> consume(SseEvent event) sync* {
       final name = event.event;
       if (event.data.isEmpty) return;
       // Decode only what we act on. An unrecognised event — a gateway's own
       // keep-alive, say — may not carry JSON at all.
       if (name != 'message_start' &&
+          name != 'content_block_start' &&
           name != 'content_block_delta' &&
           name != 'message_delta') {
         return;
@@ -254,9 +282,29 @@ class AnthropicBroker extends ChatBroker {
         // The serving model can differ from the one that was requested.
         servingModel = message['model'] as String? ?? servingModel;
         readUsage(message['usage']);
+      } else if (name == 'content_block_start') {
+        final block = json['content_block'] as Map<String, Object?>?;
+        final index = (json['index'] as num?)?.toInt();
+        if (block == null || index == null) return;
+        if (block['type'] != 'tool_use') return;
+        partialTools[index] = _PartialToolCall(
+          id: block['id'] as String? ?? '',
+          name: block['name'] as String? ?? '',
+        );
       } else if (name == 'content_block_delta') {
         final delta = json['delta'] as Map<String, Object?>?;
         if (delta == null) return;
+        if (delta['type'] == 'input_json_delta') {
+          final index = (json['index'] as num?)?.toInt();
+          if (index == null) return;
+          // No matching `content_block_start` means this is a block we never
+          // opened — a shape we don't model. Dropping it beats inventing a
+          // nameless call.
+          final partial = partialTools[index];
+          if (partial == null) return;
+          partial.json.write(delta['partial_json'] as String? ?? '');
+          return;
+        }
         if (delta['type'] != 'text_delta') return;
         final text = delta['text'] as String?;
         if (text == null || text.isEmpty) return;
@@ -314,6 +362,10 @@ class AnthropicBroker extends ChatBroker {
             outputTokens: outputTokens,
             cacheReadInputTokens: cacheReadInputTokens,
             cacheCreationInputTokens: cacheCreationInputTokens,
+            // Assembled here rather than at `content_block_stop`, so a stream
+            // that was cancelled or cut short still reports the calls it saw —
+            // with whatever arguments parsed, which may be none.
+            toolCalls: _drainPartials(partialTools),
           ),
         );
       }
@@ -332,6 +384,11 @@ class AnthropicBroker extends ChatBroker {
   /// `temperature` is only included when the caller explicitly set one,
   /// because current models reject it. Effort and structured output ride in
   /// `output_config`; there is no assistant prefill, which is also rejected.
+  ///
+  /// [ChatRequest.tools] becomes a flat `tools` array of
+  /// `{name, description, input_schema}` — the schema goes verbatim, the same
+  /// way `output_config.format` does. `tool_choice` is an object here, not a
+  /// string, and [AiToolChoice.required] is spelled `any`.
   @visibleForTesting
   Map<String, Object?> buildPayload(
     String model,
@@ -343,6 +400,8 @@ class AnthropicBroker extends ChatBroker {
       if (req.jsonSchema != null)
         'format': {'type': 'json_schema', 'schema': req.jsonSchema},
     };
+    final tools = req.tools;
+    final hasTools = tools != null && tools.isNotEmpty;
     return {
       'model': model,
       'max_tokens': req.maxTokens,
@@ -360,12 +419,108 @@ class AnthropicBroker extends ChatBroker {
                 },
               ]
             : req.system,
-      'messages': [
-        for (final m in req.messages)
-          {'role': m.roleName, 'content': m.content},
-      ],
+      'messages': _renderMessages(req.messages),
+      if (hasTools)
+        'tools': [
+          for (final tool in tools)
+            {
+              'name': tool.name,
+              'description': tool.description,
+              'input_schema': tool.inputSchema,
+            },
+        ],
+      if (hasTools && req.toolChoice != null)
+        'tool_choice': {'type': _toolChoiceType(req.toolChoice!)},
       if (outputConfig.isNotEmpty) 'output_config': outputConfig,
       if (stream) 'stream': true,
     };
   }
+
+  /// Anthropic's word for "you must call something" is `any`, not `required`.
+  static String _toolChoiceType(AiToolChoice choice) =>
+      choice == AiToolChoice.required ? 'any' : choice.wire;
+
+  /// Renders the turn history into Anthropic's message array.
+  ///
+  /// Plain turns keep the string-content shorthand they have always used, so
+  /// a request without tools is byte-for-byte what earlier versions sent.
+  /// The two tool shapes need block content:
+  ///
+  ///  * an assistant turn that asked for tools becomes an optional `text`
+  ///    block followed by one `tool_use` block per call;
+  ///  * **every consecutive tool result collapses into one user message.**
+  ///    This is the rule that bites: a model that asked for three tools in one
+  ///    turn expects all three results in a single following message, and
+  ///    splitting them across three messages is a 400.
+  static List<Map<String, Object?>> _renderMessages(List<AiMessage> messages) {
+    final out = <Map<String, Object?>>[];
+    var i = 0;
+    while (i < messages.length) {
+      final message = messages[i];
+      if (message.isToolResult) {
+        final blocks = <Object?>[];
+        while (i < messages.length && messages[i].isToolResult) {
+          final result = messages[i];
+          blocks.add({
+            'type': 'tool_result',
+            'tool_use_id': result.toolCallId,
+            'content': result.content,
+            // Absent means false; only send the flag when it says something.
+            if (result.isError) 'is_error': true,
+          });
+          i++;
+        }
+        out.add({'role': 'user', 'content': blocks});
+        continue;
+      }
+      if (message.toolCalls.isNotEmpty) {
+        out.add({
+          'role': message.roleName,
+          'content': <Object?>[
+            if (message.content.isNotEmpty)
+              {'type': 'text', 'text': message.content},
+            for (final call in message.toolCalls)
+              {
+                'type': 'tool_use',
+                'id': call.id,
+                'name': call.name,
+                'input': call.arguments,
+              },
+          ],
+        });
+        i++;
+        continue;
+      }
+      out.add({'role': message.roleName, 'content': message.content});
+      i++;
+    }
+    return out;
+  }
+
+  /// Turns the accumulated `input_json_delta` fragments into calls, in block
+  /// order. A buffer that never became valid JSON yields an empty argument
+  /// map rather than dropping the call — see [decodeToolArguments].
+  static List<AiToolCall> _drainPartials(Map<int, _PartialToolCall> partials) {
+    if (partials.isEmpty) return const [];
+    final indices = partials.keys.toList()..sort();
+    return [
+      for (final index in indices)
+        AiToolCall(
+          id: partials[index]!.id,
+          name: partials[index]!.name,
+          arguments: decodeToolArguments(partials[index]!.json.toString()),
+        ),
+    ];
+  }
+}
+
+/// A `tool_use` block being assembled from stream events: the id and name land
+/// whole on `content_block_start`, the arguments arrive as JSON fragments that
+/// only parse once concatenated.
+class _PartialToolCall {
+  _PartialToolCall({required this.id, required this.name});
+
+  final String id;
+  final String name;
+  final StringBuffer json = StringBuffer();
 }

@@ -82,6 +82,7 @@ class AiCompletion {
     this.outputTokens = 0,
     this.cacheReadInputTokens = 0,
     this.cacheCreationInputTokens = 0,
+    this.toolCalls = const [],
   });
 
   /// The concatenated text of every text block in the response. Empty when
@@ -104,7 +105,22 @@ class AiCompletion {
   final int cacheReadInputTokens;
   final int cacheCreationInputTokens;
 
+  /// The tools the model asked to call, in the order it asked for them.
+  /// Empty on an ordinary turn — which is every turn where the request
+  /// declared no [ChatRequest.tools].
+  ///
+  /// A model can ask for several at once, and asking is all it does: nothing
+  /// here has been executed. Run them, then send the next request with
+  /// [AiMessage.assistantToolCalls] followed by one [AiMessage.toolResult]
+  /// per entry.
+  final List<AiToolCall> toolCalls;
+
   bool get isRefusal => stopReason == AiStopReason.refusal;
+
+  /// True when the model stopped in order to call a tool. Prefer this over
+  /// testing [toolCalls] for emptiness: the two agree on every provider, but
+  /// this is the one that says *why* the turn ended.
+  bool get wantsTool => stopReason == AiStopReason.toolUse;
 
   /// True when the reply was cut off by the token ceiling, which usually
   /// means the caller's `maxTokens` is too low rather than that the model
@@ -114,7 +130,8 @@ class AiCompletion {
   @override
   String toString() => 'AiCompletion(model: $model, stop: ${stopReason.wire}, '
       'in: $inputTokens, out: $outputTokens, '
-      'cacheRead: $cacheReadInputTokens, chars: ${text.length})';
+      'cacheRead: $cacheReadInputTokens, chars: ${text.length}'
+      '${toolCalls.isEmpty ? '' : ', tools: ${toolCalls.length}'})';
 }
 
 /// A streaming turn: the text as it arrives, plus the accounting that is only

@@ -28,6 +28,7 @@ lib/src/
     completion.dart            — AiCompletion / StreamedCompletion / AiStopReason / AiEffort
     json_schema.dart           — toGeminiSchema / toOpenAiStrictSchema (pure, no I/O)
     message.dart               — ChatRequest / AiMessage (system is on ChatRequest, not a role)
+    tool.dart                  — AiTool / AiToolChoice / AiToolCall / decodeToolArguments
 
   embed/
     embed_broker.dart          — EmbedBroker interface
@@ -78,7 +79,7 @@ The CLI is built on these same library types — anything the CLI does, an app i
 
 Things deliberately *not* in this package — do not add without a real consumer asking:
 - No safety / SQL gate. Prompt sanitisation, output filtering, content moderation — call-site concern.
-- No tools / function calling.
+- No tool *execution*. Tool calling exists (0.7.0+) — declare, read back, feed results in — but running the tool, sandboxing it and looping until the model stops asking are all call-site concerns. Don't add a dispatcher here.
 - No reranker in the RAG layer — cosine top-K only. Add cross-encoder / Cohere Rerank at the call site if quality demands it.
 - No Flutter widgets. Build pickers / chat UIs / settings dialogs on top in the consuming app.
 - No web support for the RAG layer. `CorpusStore` depends on native `package:sqlite3`. The chat / embed / translate APIs are pure Dart and work on web; the storage layer is native-only today.
@@ -108,6 +109,33 @@ When editing or adding a broker, mind these — they're the things that diverge 
   beats both prose and a 400. Every broker builds its payload in one
   `@visibleForTesting buildPayload`, shared by the streaming and
   non-streaming paths — keep it that way so the two cannot diverge.
+- **Tool calling (`ChatRequest.tools`).** One `AiTool` declaration, three
+  dialects, and they disagree about *results* even more than about
+  declarations. Anthropic: flat `tools: [{name, description, input_schema}]`,
+  `tool_choice: {type: 'auto'|'none'|'any'}` (`any` is our `required`),
+  response `content[]` blocks of `type: 'tool_use'`, and **every result for a
+  turn must ride in one user message** — splitting them is a 400, which is why
+  `_renderMessages` coalesces consecutive `AiMessage.toolResult`s. OpenAI:
+  `tools: [{type: 'function', function: {…}}]`, bare-string `tool_choice`,
+  `function.arguments` is a JSON **string** in both directions (parse it with
+  `decodeToolArguments`, re-encode it on the way out), and results are one
+  `role: 'tool'` message *per call* — the opposite of Anthropic. Gemini: a
+  single `tools: [{functionDeclarations: […]}]` entry, `parameters` through
+  `toGeminiSchema` (same OpenAPI-3 subset as `responseSchema`), no call id at
+  all (`GeminiBroker.syntheticToolCallId` mints one) and `functionResponse`
+  keyed by function *name*, recovered from the history or decoded back out of
+  the synthetic id. Gemini also never reports a tool finish reason — it says
+  `STOP` — so `stopReason` is normalised to `toolUse` from the calls
+  themselves *there only*; the other two say so on the wire and are believed,
+  so a call truncated by `max_tokens` still reads as truncated.
+- **Streamed tool arguments.** Anthropic and OpenAI both send them as JSON
+  fragments that parse only once concatenated, keyed by `index` because two
+  calls interleave. Both brokers accumulate into a `_PartialToolCall` map and
+  materialise in the `finally` — not at `content_block_stop` / the last
+  fragment — so a cancelled or truncated stream still reports the calls it
+  saw. Gemini sends each `functionCall` part whole. Text deltas must keep
+  flowing untouched through all of this; a caller that ignores tools should
+  not be able to tell.
 - **Retry policy.** Use `retryRequest` for every non-streaming call. Pass `isHardFailure` when a status code can mean either "retry" or "give up" — currently only OpenAI 429 (`quota` in body) needs this. SSE calls bypass retry (mid-stream restart isn't sound).
 - **Embed per-call limits.** OpenAI `text-embedding-3-*`: ≤2048 inputs, ≤300k tokens per request, ≤8191 tokens each. Gemini `text-embedding-004`: ≤100 per call. The broker just forwards the list — use the higher-level `Embedder` to batch.
 - **Google Translate glossary.** Cloud Translation v2 doesn't expose v3's server-side glossary resource, so `GoogleTranslateBroker` implements glossary client-side via `<span translate="no">…</span>` HTML wrapping with `format: 'html'`. Source text + glossary targets are HTML-escaped before sending; entities in the response are decoded back. Matching is exact, case-sensitive, substring — provide every casing you care about and use distinctive terms. On overlap the longer key wins; otherwise the earliest match wins. `domain` / `tone` / `context` hints are silently accepted but ignored by v2 — use `LlmTranslator` when they matter.
@@ -151,6 +179,14 @@ The CLI auto-loads a `./.env` for keys, so a `.env` at the repo root with `OPENA
 `pubspec.yaml` registers two executables: `ai_broker` (primary) and `aib` (alias). After `dart pub global activate ai_broker` both land on PATH.
 
 ## Tests
+
+Two files break the mirror on purpose, because the thing under test is a
+cross-provider contract rather than a source file: `test/brokers/tool_calling_test.dart`
+(one group per provider, same five cases each — declaration, one call, several
+calls in a turn, results fed back, streaming) and
+`test/brokers/anthropic_modern_api_test.dart`. Put per-provider tool changes in
+the first of those, not in the individual broker test files, so the three wire
+shapes stay readable side by side.
 
 Tests live under `test/` mirroring `lib/src/` — subdirectories for each modality (`core/`, `chat/`, `embed/`, `translate/`, `brokers/`, `rag/`, `cli/`). One `*_test.dart` per source file; follow this naming so the layout stays scannable. Tests use fake brokers / injected `http.Client` / in-memory `CorpusStore.openInMemory()` — never hit a real provider or touch disk in unit tests. The CLI commands accept `brokerFactory` + `keyResolver` constructor parameters specifically as test seams.
 

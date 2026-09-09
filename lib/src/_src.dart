@@ -17,6 +17,7 @@ export './chat/chat_broker.dart';
 export './chat/completion.dart';
 export './chat/json_schema.dart';
 export './chat/message.dart';
+export './chat/tool.dart';
 export './cli/ask_command.dart';
 export './cli/collections_command.dart';
 export './cli/ingest_command.dart';

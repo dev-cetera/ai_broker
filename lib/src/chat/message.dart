@@ -28,15 +28,79 @@ class AiMessage {
   final AiRole role;
   final String content;
 
-  const AiMessage(this.role, this.content);
+  /// The tool calls this assistant turn asked for. Empty on every message
+  /// that is not a tool-use turn, which is all of them until a caller starts
+  /// replaying [AiCompletion.toolCalls] into the history.
+  ///
+  /// Replaying matters: all three providers reject a tool result whose call
+  /// is not in the transcript above it. Append
+  /// `AiMessage.assistantToolCalls(done.toolCalls, content: done.text)`
+  /// before the results.
+  final List<AiToolCall> toolCalls;
 
-  const AiMessage.user(this.content) : role = AiRole.user;
-  const AiMessage.assistant(this.content) : role = AiRole.assistant;
+  /// The [AiToolCall.id] this message answers, on a message built by
+  /// [AiMessage.toolResult]. Null on every other message.
+  final String? toolCallId;
+
+  /// Whether [content] is a failure report rather than a result. Anthropic
+  /// has a field for it (`is_error`); the other two do not, so it only
+  /// changes how the text is framed there.
+  final bool isError;
+
+  const AiMessage(this.role, this.content)
+      : toolCalls = const [],
+        toolCallId = null,
+        isError = false;
+
+  const AiMessage.user(this.content)
+      : role = AiRole.user,
+        toolCalls = const [],
+        toolCallId = null,
+        isError = false;
+
+  const AiMessage.assistant(this.content)
+      : role = AiRole.assistant,
+        toolCalls = const [],
+        toolCallId = null,
+        isError = false;
+
+  /// The assistant turn that asked for tools, replayed into the history.
+  ///
+  /// [content] is whatever text came alongside the calls — usually empty,
+  /// sometimes a sentence of narration. Pass [AiCompletion.text] straight
+  /// through; an empty string is dropped from the payload rather than sent as
+  /// an empty block.
+  const AiMessage.assistantToolCalls(
+    this.toolCalls, {
+    this.content = '',
+  })  : role = AiRole.assistant,
+        toolCallId = null,
+        isError = false;
+
+  /// The answer to one [AiToolCall], fed back so the model can carry on.
+  ///
+  /// Carried as a user-role message because that is where two of the three
+  /// providers put it; the third gets its own `role: "tool"` message. Send one
+  /// per call the model made — the brokers coalesce them into whatever shape
+  /// the provider expects, including Anthropic's requirement that every result
+  /// for a turn ride in a *single* user message.
+  const AiMessage.toolResult({
+    required String this.toolCallId,
+    required this.content,
+    this.isError = false,
+  })  : role = AiRole.user,
+        toolCalls = const [];
 
   String get roleName => role == AiRole.user ? 'user' : 'assistant';
 
+  /// True for a message built by [AiMessage.toolResult].
+  bool get isToolResult => toolCallId != null;
+
   @override
-  String toString() => '${role.name}: $content';
+  String toString() => toolCalls.isEmpty
+      ? '${role.name}: $content'
+      : '${role.name}: $content '
+          '[${toolCalls.map((c) => c.name).join(', ')}]';
 }
 
 /// What every broker call boils down to. [system] is the persistent
@@ -90,6 +154,29 @@ class ChatRequest {
   /// on every turn, or a judge re-scoring the same prompt each round.
   final bool cacheSystem;
 
+  /// Tools the model may call this turn. Null or empty sends nothing, which
+  /// is what every request that predates tool calling does.
+  ///
+  /// **Honoured by every chat broker**, each in its own dialect: Anthropic
+  /// takes `tools: [{name, description, input_schema}]`; OpenAI wraps each in
+  /// `{type: 'function', function: {…}}`; Gemini nests them under a single
+  /// `tools: [{functionDeclarations: […]}]` and wants the schema in its
+  /// OpenAPI-3 subset.
+  ///
+  /// A turn that wants a tool comes back with [AiStopReason.toolUse] and the
+  /// calls on [AiCompletion.toolCalls] — reachable from `chatDetailed` and
+  /// from `streamDetailed`'s completion, not from the text-only `chat` and
+  /// `stream`. Run them, then send the next request with the assistant turn
+  /// ([AiMessage.assistantToolCalls]) and one [AiMessage.toolResult] per call
+  /// appended to [messages].
+  final List<AiTool>? tools;
+
+  /// Whether the model may, must, or must not call one. Null means the field
+  /// is not sent at all and the provider's own default applies. Ignored when
+  /// [tools] is null or empty — a choice with nothing to choose from is a 400
+  /// on OpenAI and Anthropic alike.
+  final AiToolChoice? toolChoice;
+
   const ChatRequest({
     required this.system,
     required this.messages,
@@ -98,6 +185,8 @@ class ChatRequest {
     this.effort,
     this.jsonSchema,
     this.cacheSystem = false,
+    this.tools,
+    this.toolChoice,
   })  : assert(
           maxTokens > 0,
           'ChatRequest.maxTokens must be positive.',
@@ -116,6 +205,8 @@ class ChatRequest {
     AiEffort? effort,
     Map<String, Object?>? jsonSchema,
     bool cacheSystem = false,
+    List<AiTool>? tools,
+    AiToolChoice? toolChoice,
   }) =>
       ChatRequest(
         system: system,
@@ -125,5 +216,7 @@ class ChatRequest {
         effort: effort,
         jsonSchema: jsonSchema,
         cacheSystem: cacheSystem,
+        tools: tools,
+        toolChoice: toolChoice,
       );
 }
