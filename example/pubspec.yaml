@@ -1,4 +1,5 @@
 name: ai_broker_example
+description: Runnable examples for ai_broker — chat, streaming, tools and structured output against each provider.
 homepage: https://dev-cetera.com/
 publish_to: none
 version: 0.1.0

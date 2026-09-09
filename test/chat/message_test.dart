@@ -49,9 +49,9 @@ void main() {
   });
 
   group('ChatRequest', () {
-    test('defaults temperature to 0.3 and maxTokens to 2048', () {
+    test('omits temperature by default and defaults maxTokens to 2048', () {
       const req = ChatRequest(system: 's', messages: []);
-      expect(req.temperature, 0.3);
+      expect(req.temperature, isNull);
       expect(req.maxTokens, 2048);
     });
 

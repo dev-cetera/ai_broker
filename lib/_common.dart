@@ -15,7 +15,7 @@
 // `import '/_common.dart';`. Bundle third-party APIs the package uses
 // here so individual sources don't repeat the same imports.
 
-export 'dart:async' show StreamController, StreamSubscription;
+export 'dart:async' show Completer, StreamController, StreamSubscription;
 export 'dart:convert' show jsonDecode, jsonEncode, utf8, LineSplitter;
 export 'dart:io' show Platform;
 
