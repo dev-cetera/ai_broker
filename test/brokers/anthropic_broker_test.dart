@@ -254,4 +254,60 @@ void main() {
       });
     });
   });
+
+  group('AnthropicBroker.completeWithMeta', () {
+    AnthropicBroker brokerReplying(Map<String, Object?> body) =>
+        AnthropicBroker(
+          client: MockClient((_) async => Response(jsonEncode(body), 200)),
+        );
+
+    Map<String, Object?> reply(String? stopReason) => {
+          'content': [
+            {'type': 'text', 'text': ' hello '},
+          ],
+          'stop_reason': stopReason,
+          'usage': {'input_tokens': 7, 'output_tokens': 9},
+        };
+
+    Future<AiCompletion> run(AnthropicBroker b) => b.completeWithMeta(
+          apiKey: 'k',
+          model: 'claude-x',
+          system: 's',
+          user: 'u',
+        );
+
+    test('carries text, stop reason and usage counts', () async {
+      final out = await run(brokerReplying(reply('end_turn')));
+      expect(out.text, 'hello');
+      expect(out.rawFinishReason, 'end_turn');
+      expect(out.finishReason, AiFinishReason.stop);
+      expect(out.inputTokens, 7);
+      expect(out.outputTokens, 9);
+      expect(out.thinkingTokens, isNull);
+    });
+
+    test('maps every documented Anthropic stop reason', () async {
+      const expected = <String, AiFinishReason?>{
+        'end_turn': AiFinishReason.stop,
+        'stop_sequence': AiFinishReason.stopSequence,
+        'max_tokens': AiFinishReason.maxTokens,
+        'tool_use': AiFinishReason.toolUse,
+        'pause_turn': AiFinishReason.pauseTurn,
+        'refusal': AiFinishReason.safety,
+        'model_context_window_exceeded': AiFinishReason.contextWindowExceeded,
+        'something_new': null,
+      };
+      for (final entry in expected.entries) {
+        final out = await run(brokerReplying(reply(entry.key)));
+        expect(out.rawFinishReason, entry.key);
+        expect(out.finishReason, entry.value, reason: entry.key);
+      }
+    });
+
+    test('leaves the reason null when stop_reason is null', () async {
+      final out = await run(brokerReplying(reply(null)));
+      expect(out.rawFinishReason, isNull);
+      expect(out.finishReason, isNull);
+    });
+  });
 }

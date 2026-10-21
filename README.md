@@ -32,11 +32,24 @@ abstract class AiBroker {
   Future<List<String>> listModels(String apiKey);
   Future<String> complete({ ... });                     // single-shot
   Future<String> chat({ ... ChatRequest request });     // multi-turn
+  Future<AiCompletion> completeWithMeta({ ... });       // + finish reason, token counts
+  Future<AiCompletion> chatWithMeta({ ... });           // the one call every broker implements
   Stream<String> stream({ ... ChatRequest request });   // token-by-token
 }
 ```
 
 Concrete brokers: `OpenAiBroker`, `AnthropicBroker`, `GeminiBroker`.
+
+`completeWithMeta` / `chatWithMeta` return an `AiCompletion`: the text,
+the provider's raw finish reason (`'STOP'`, `'end_turn'`, `'length'`, …),
+that reason mapped onto `AiFinishReason` (`null` when unmapped), and the
+input / output / thinking token counts. Check
+`finishReason == AiFinishReason.maxTokens` to tell a reply cut off at the
+token limit from a complete one.
+
+Every non-streaming call retries 429 / 500 / 502 / 503 / 504 / 529 and
+transient network errors with exponential backoff, honouring
+`Retry-After` (capped at 60 s).
 Wire once via `AiBrokerRegistry`, look up by id thereafter.
 
 ## Quick start

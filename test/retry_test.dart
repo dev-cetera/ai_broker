@@ -11,6 +11,9 @@
 // ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 //.title~
 
+import 'dart:async';
+import 'dart:io' show HttpDate;
+
 import 'package:ai_broker/ai_broker.dart';
 import 'package:http/http.dart';
 import 'package:test/test.dart';
@@ -69,6 +72,170 @@ void main() {
       expect(i, 2);
     });
 
+    for (final status in [500, 502, 504]) {
+      test('retries on $status then succeeds', () async {
+        final statuses = [status, 200];
+        var i = 0;
+        final res = await retryRequest(
+          send: () async => Response('body', statuses[i++]),
+          providerLabel: 'Test',
+          baseDelay: Duration.zero,
+        );
+        expect(res.statusCode, 200);
+        expect(i, 2);
+      });
+    }
+
+    test('retries a ClientException (network failure) then succeeds', () async {
+      var calls = 0;
+      final res = await retryRequest(
+        send: () async {
+          calls++;
+          if (calls == 1) throw ClientException('Connection reset');
+          return _ok();
+        },
+        providerLabel: 'Test',
+        baseDelay: Duration.zero,
+      );
+      expect(res.statusCode, 200);
+      expect(calls, 2);
+    });
+
+    test('does not retry a TimeoutException (the provider may still bill it)',
+        () async {
+      var calls = 0;
+      await expectLater(
+        retryRequest(
+          send: () async {
+            calls++;
+            throw TimeoutException('slow');
+          },
+          providerLabel: 'Test',
+          baseDelay: Duration.zero,
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+      expect(calls, 1);
+    });
+
+    test('wraps a network failure that outlasts every attempt', () async {
+      var calls = 0;
+      await expectLater(
+        retryRequest(
+          send: () async {
+            calls++;
+            throw ClientException('Failed host lookup');
+          },
+          providerLabel: 'Test',
+          maxAttempts: 3,
+          baseDelay: Duration.zero,
+        ),
+        throwsA(
+          isA<AiBrokerException>()
+              .having((e) => e.statusCode, 'statusCode', isNull)
+              .having(
+                (e) => e.message,
+                'message',
+                allOf(
+                  contains('Test request failed after 3 attempts'),
+                  contains('Failed host lookup'),
+                ),
+              ),
+        ),
+      );
+      expect(calls, 3);
+    });
+
+    test('does not retry other exceptions', () async {
+      var calls = 0;
+      await expectLater(
+        retryRequest(
+          send: () async {
+            calls++;
+            throw StateError('bug');
+          },
+          providerLabel: 'Test',
+          baseDelay: Duration.zero,
+        ),
+        throwsStateError,
+      );
+      expect(calls, 1);
+    });
+
+    group('Retry-After', () {
+      Future<List<Duration>> waitsFor(
+        Response first, {
+        Duration baseDelay = const Duration(seconds: 5),
+        Duration maxRetryAfter = const Duration(seconds: 60),
+      }) async {
+        final waits = <Duration>[];
+        final responses = [first, _ok()];
+        var i = 0;
+        await retryRequest(
+          send: () async => responses[i++],
+          providerLabel: 'Test',
+          baseDelay: baseDelay,
+          maxRetryAfter: maxRetryAfter,
+          wait: (d) async => waits.add(d),
+        );
+        return waits;
+      }
+
+      test('without the header, waits the exponential backoff', () async {
+        final waits = await waitsFor(Response('busy', 503));
+        expect(waits, [const Duration(seconds: 5)]);
+      });
+
+      test('honours a delay in seconds', () async {
+        final waits = await waitsFor(
+          Response('busy', 429, headers: {'retry-after': '2'}),
+        );
+        expect(waits, [const Duration(seconds: 2)]);
+      });
+
+      test('caps a long delay at maxRetryAfter', () async {
+        final waits = await waitsFor(
+          Response('busy', 503, headers: {'retry-after': '3600'}),
+          maxRetryAfter: const Duration(seconds: 30),
+        );
+        expect(waits, [const Duration(seconds: 30)]);
+      });
+
+      test('honours an HTTP-date, capped at maxRetryAfter', () async {
+        final later = DateTime.now().toUtc().add(const Duration(hours: 1));
+        final waits = await waitsFor(
+          Response(
+            'busy',
+            503,
+            headers: {'retry-after': HttpDate.format(later)},
+          ),
+          maxRetryAfter: const Duration(seconds: 45),
+        );
+        expect(waits, [const Duration(seconds: 45)]);
+      });
+
+      test('an HTTP-date in the past means retry now', () async {
+        final earlier =
+            DateTime.now().toUtc().subtract(const Duration(hours: 1));
+        final waits = await waitsFor(
+          Response(
+            'busy',
+            503,
+            headers: {'retry-after': HttpDate.format(earlier)},
+          ),
+        );
+        expect(waits, [Duration.zero]);
+      });
+
+      test('an unreadable value falls back to the backoff', () async {
+        final waits = await waitsFor(
+          Response('busy', 503, headers: {'retry-after': 'soon'}),
+          baseDelay: const Duration(seconds: 3),
+        );
+        expect(waits, [const Duration(seconds: 3)]);
+      });
+    });
+
     test('throws AiBrokerException for non-retryable 4xx', () async {
       await expectLater(
         retryRequest(
@@ -88,7 +255,7 @@ void main() {
     test('falls back to the raw body when error.message is missing', () async {
       await expectLater(
         retryRequest(
-          send: () async => Response('plain text body', 500),
+          send: () async => Response('plain text body', 404),
           providerLabel: 'OpenAI',
           baseDelay: Duration.zero,
         ),
@@ -145,7 +312,7 @@ void main() {
               .having(
                 (e) => e.message,
                 'message',
-                contains('still rate-limited after 3 attempts'),
+                contains('Test still failing (HTTP 429) after 3 attempts'),
               ),
         ),
       );

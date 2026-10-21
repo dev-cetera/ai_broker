@@ -14,7 +14,9 @@
 import 'package:ai_broker/ai_broker.dart';
 import 'package:test/test.dart';
 
-class _StubBroker implements AiBroker {
+/// Implements only the primitives, so every other method comes from the
+/// defaults on [AiBroker].
+class _StubBroker extends AiBroker {
   _StubBroker(this.id, this.label);
 
   @override
@@ -23,27 +25,26 @@ class _StubBroker implements AiBroker {
   @override
   final String label;
 
+  ChatRequest? lastRequest;
+
   @override
   Future<List<String>> listModels(String apiKey) async => const [];
 
   @override
-  Future<String> complete({
-    required String apiKey,
-    required String model,
-    required String system,
-    required String user,
-    double temperature = 0.3,
-    int maxTokens = 2048,
-  }) async =>
-      '';
-
-  @override
-  Future<String> chat({
+  Future<AiCompletion> chatWithMeta({
     required String apiKey,
     required String model,
     required ChatRequest request,
-  }) async =>
-      '';
+  }) async {
+    lastRequest = request;
+    return const AiCompletion(
+      text: 'reply',
+      rawFinishReason: 'max_tokens',
+      finishReason: AiFinishReason.maxTokens,
+      inputTokens: 1,
+      outputTokens: 2,
+    );
+  }
 
   @override
   Stream<String> stream({
@@ -129,6 +130,80 @@ void main() {
 
     test('is an Exception', () {
       expect(const AiBrokerException('x'), isA<Exception>());
+    });
+  });
+
+  group('AiBroker defaults', () {
+    test('completeWithMeta sends one user message through chatWithMeta',
+        () async {
+      final b = _StubBroker('stub', 'Stub');
+      final out = await b.completeWithMeta(
+        apiKey: 'k',
+        model: 'm',
+        system: 'sys',
+        user: 'hi',
+        temperature: 0.5,
+        maxTokens: 64,
+      );
+      expect(out.text, 'reply');
+      expect(out.finishReason, AiFinishReason.maxTokens);
+      final sent = b.lastRequest!;
+      expect(sent.system, 'sys');
+      expect(sent.messages.single.content, 'hi');
+      expect(sent.temperature, 0.5);
+      expect(sent.maxTokens, 64);
+    });
+
+    test('complete and chat return the text of the meta call', () async {
+      final b = _StubBroker('stub', 'Stub');
+      expect(
+        await b.complete(apiKey: 'k', model: 'm', system: 's', user: 'u'),
+        'reply',
+      );
+      expect(
+        await b.chat(
+          apiKey: 'k',
+          model: 'm',
+          request: ChatRequest.single(system: 's', user: 'u'),
+        ),
+        'reply',
+      );
+    });
+  });
+
+  group('AiCompletion', () {
+    test('compares by value', () {
+      const a = AiCompletion(
+        text: 't',
+        rawFinishReason: 'STOP',
+        finishReason: AiFinishReason.stop,
+        inputTokens: 1,
+        outputTokens: 2,
+        thinkingTokens: 0,
+      );
+      const b = AiCompletion(
+        text: 't',
+        rawFinishReason: 'STOP',
+        finishReason: AiFinishReason.stop,
+        inputTokens: 1,
+        outputTokens: 2,
+        thinkingTokens: 0,
+      );
+      expect(a, b);
+      expect(a.hashCode, b.hashCode);
+      expect(
+        a,
+        isNot(
+          const AiCompletion(
+            text: 't',
+            rawFinishReason: 'MAX_TOKENS',
+            finishReason: AiFinishReason.maxTokens,
+            inputTokens: 1,
+            outputTokens: 2,
+            thinkingTokens: 0,
+          ),
+        ),
+      );
     });
   });
 }

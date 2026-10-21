@@ -35,7 +35,8 @@ abstract class AiBroker {
   /// flooded with irrelevant entries.
   Future<List<String>> listModels(String apiKey);
 
-  /// Single-shot. Returns the assistant's raw text.
+  /// Single-shot. Returns the assistant's raw text. Same call as
+  /// [completeWithMeta], keeping only [AiCompletion.text].
   Future<String> complete({
     required String apiKey,
     required String model,
@@ -43,8 +44,29 @@ abstract class AiBroker {
     required String user,
     double temperature = 0.3,
     int maxTokens = 2048,
+  }) async =>
+      (await completeWithMeta(
+        apiKey: apiKey,
+        model: model,
+        system: system,
+        user: user,
+        temperature: temperature,
+        maxTokens: maxTokens,
+      ))
+          .text;
+
+  /// Single-shot, returning the reply with why the model stopped and the
+  /// token counts the provider reported. Use it to tell a reply cut off at
+  /// [maxTokens] ([AiFinishReason.maxTokens]) from a complete one.
+  Future<AiCompletion> completeWithMeta({
+    required String apiKey,
+    required String model,
+    required String system,
+    required String user,
+    double temperature = 0.3,
+    int maxTokens = 2048,
   }) =>
-      chat(
+      chatWithMeta(
         apiKey: apiKey,
         model: model,
         request: ChatRequest.single(
@@ -56,7 +78,19 @@ abstract class AiBroker {
       );
 
   /// Multi-turn. Returns the assistant's raw text for the final turn.
+  /// Same call as [chatWithMeta], keeping only [AiCompletion.text].
   Future<String> chat({
+    required String apiKey,
+    required String model,
+    required ChatRequest request,
+  }) async =>
+      (await chatWithMeta(apiKey: apiKey, model: model, request: request)).text;
+
+  /// Multi-turn, returning the final turn's reply with why the model
+  /// stopped and the token counts the provider reported. Every provider
+  /// call goes through here; [chat], [complete] and [completeWithMeta]
+  /// are built on it.
+  Future<AiCompletion> chatWithMeta({
     required String apiKey,
     required String model,
     required ChatRequest request,

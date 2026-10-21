@@ -14,29 +14,56 @@
 import '/_common.dart';
 
 /// Status codes that mean "try again later, the request itself is
-/// fine": rate limits and transient upstream overload. Quota-exceeded
-/// (a hard 429 with `quota` in the body) is *not* retryable — callers
-/// should surface that to the user instead of burning attempts.
-const retryableStatusCodes = {429, 503, 529};
+/// fine": rate limits (429), transient server errors (500, 502, 504) and
+/// upstream overload (503, Anthropic's 529). Quota-exceeded (a hard 429
+/// with `quota` in the body) is *not* retryable — callers pass
+/// `isHardFailure` to surface that to the user instead of burning attempts.
+const retryableStatusCodes = {429, 500, 502, 503, 504, 529};
 
-/// HTTP retry with exponential backoff capped at 5 attempts × 5s × 2ⁿ.
-/// Shared by every broker so retry policy lives in one place.
+/// HTTP retry with exponential backoff: up to [maxAttempts] tries, waiting
+/// [baseDelay] × 2ⁿ between them. Shared by every broker so retry policy
+/// lives in one place.
 ///
-/// [send] runs the request. On a status in [retryableStatusCodes],
-/// waits and retries. On any other ≥400, throws [AiBrokerException]
-/// with the body. After [maxAttempts], throws.
+/// [send] runs the request. It is retried when:
+///  - the response status is in [retryableStatusCodes]. When the response
+///    carries a `Retry-After` header (seconds or an HTTP-date), that wait
+///    replaces the backoff, capped at [maxRetryAfter];
+///  - [send] throws a transient network error: a `ClientException` from
+///    `package:http` (which also covers socket failures — `IOClient`
+///    rethrows a `SocketException` as one).
+///
+/// A `TimeoutException` is deliberately NOT retried: the provider may still
+/// be generating (and billing) the timed-out request, so re-sending a long
+/// generation would multiply its cost. It propagates untouched.
+///
+/// Any other ≥400 throws [AiBrokerException] with the body; any other
+/// exception from [send] propagates untouched. After [maxAttempts], throws
+/// [AiBrokerException].
 ///
 /// [providerLabel] is used in error messages so the user can tell
 /// which provider failed (`'OpenAI 429: ...'`).
+///
+/// [wait] performs the pause between attempts; tests pass a recorder.
 Future<Response> retryRequest({
   required Future<Response> Function() send,
   required String providerLabel,
   int maxAttempts = 5,
   Duration baseDelay = const Duration(seconds: 5),
+  Duration maxRetryAfter = const Duration(seconds: 60),
   bool Function(Response)? isHardFailure,
+  Future<void> Function(Duration) wait = _sleep,
 }) async {
   for (var attempt = 0; attempt < maxAttempts; attempt++) {
-    final res = await send();
+    final isLastAttempt = attempt == maxAttempts - 1;
+    final backoff = baseDelay * (1 << attempt);
+    final Response res;
+    try {
+      res = await send();
+    } on ClientException catch (e) {
+      if (isLastAttempt) throw _networkFailure(providerLabel, maxAttempts, e);
+      await wait(backoff);
+      continue;
+    }
     if (res.statusCode >= 200 && res.statusCode < 300) return res;
     if (retryableStatusCodes.contains(res.statusCode)) {
       // Surface hard failures (e.g. quota exceeded) immediately rather
@@ -47,13 +74,19 @@ Future<Response> retryRequest({
           statusCode: res.statusCode,
         );
       }
-      if (attempt == maxAttempts - 1) {
+      if (isLastAttempt) {
         throw AiBrokerException(
-          '$providerLabel still rate-limited after $maxAttempts attempts',
+          '$providerLabel still failing (HTTP ${res.statusCode}) after '
+          '$maxAttempts attempts: ${_safeBody(res)}',
           statusCode: res.statusCode,
         );
       }
-      await Future<void>.delayed(baseDelay * (1 << attempt));
+      final retryAfter = _retryAfter(res);
+      await wait(
+        retryAfter == null
+            ? backoff
+            : (retryAfter > maxRetryAfter ? maxRetryAfter : retryAfter),
+      );
       continue;
     }
     throw AiBrokerException(
@@ -62,10 +95,41 @@ Future<Response> retryRequest({
     );
   }
   // Unreachable — the loop either returns, throws, or hits the
-  // maxAttempts guard above.
+  // last-attempt guards above.
   throw AiBrokerException(
     '$providerLabel: retry loop exhausted',
   );
+}
+
+Future<void> _sleep(Duration duration) => Future<void>.delayed(duration);
+
+AiBrokerException _networkFailure(
+  String providerLabel,
+  int maxAttempts,
+  Object error,
+) =>
+    AiBrokerException(
+      '$providerLabel request failed after $maxAttempts attempts: $error',
+    );
+
+/// The wait a `Retry-After` header asks for: whole seconds or an HTTP-date.
+/// `null` when the header is absent or unreadable (the caller then falls
+/// back to its backoff). A date already in the past means "now".
+Duration? _retryAfter(Response res) {
+  final value = res.headers['retry-after']?.trim();
+  if (value == null || value.isEmpty) return null;
+  final seconds = int.tryParse(value);
+  if (seconds != null) {
+    return seconds < 0 ? null : Duration(seconds: seconds);
+  }
+  final DateTime date;
+  try {
+    date = HttpDate.parse(value);
+  } on HttpException {
+    return null;
+  }
+  final untilThen = date.difference(DateTime.now().toUtc());
+  return untilThen.isNegative ? Duration.zero : untilThen;
 }
 
 /// Pulls an `error.message` string out of a provider's JSON error

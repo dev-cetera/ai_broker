@@ -15,7 +15,7 @@ import '/_common.dart';
 
 /// Anthropic Claude (`/v1/messages`). `system` is a top-level field,
 /// not a role — keep it out of [ChatRequest.messages].
-class AnthropicBroker implements AiBroker {
+class AnthropicBroker extends AiBroker {
   static const _baseUrl = 'https://api.anthropic.com/v1';
   static const _apiVersion = '2023-06-01';
   static const _timeout = Duration(seconds: 30);
@@ -57,27 +57,7 @@ class AnthropicBroker implements AiBroker {
   }
 
   @override
-  Future<String> complete({
-    required String apiKey,
-    required String model,
-    required String system,
-    required String user,
-    double temperature = 0.3,
-    int maxTokens = 2048,
-  }) =>
-      chat(
-        apiKey: apiKey,
-        model: model,
-        request: ChatRequest.single(
-          system: system,
-          user: user,
-          temperature: temperature,
-          maxTokens: maxTokens,
-        ),
-      );
-
-  @override
-  Future<String> chat({
+  Future<AiCompletion> chatWithMeta({
     required String apiKey,
     required String model,
     required ChatRequest request,
@@ -108,8 +88,32 @@ class AnthropicBroker implements AiBroker {
     if (out.isEmpty) {
       throw const AiBrokerException('Anthropic returned empty text.');
     }
-    return out;
+    final rawFinishReason = json['stop_reason'] as String?;
+    final usage = json['usage'] as Map<String, Object?>?;
+    return AiCompletion(
+      text: out,
+      rawFinishReason: rawFinishReason,
+      finishReason:
+          rawFinishReason == null ? null : _finishReasonOf(rawFinishReason),
+      inputTokens: usage?['input_tokens'] as int?,
+      outputTokens: usage?['output_tokens'] as int?,
+    );
   }
+
+  /// Maps Anthropic's `stop_reason` onto [AiFinishReason]. Returns `null`
+  /// for a value this package does not know; the raw string is still
+  /// carried on [AiCompletion.rawFinishReason].
+  static AiFinishReason? _finishReasonOf(String raw) => switch (raw) {
+        'end_turn' => AiFinishReason.stop,
+        'stop_sequence' => AiFinishReason.stopSequence,
+        'max_tokens' => AiFinishReason.maxTokens,
+        'tool_use' => AiFinishReason.toolUse,
+        'pause_turn' => AiFinishReason.pauseTurn,
+        'refusal' => AiFinishReason.safety,
+        'model_context_window_exceeded' => AiFinishReason.contextWindowExceeded,
+        // Unmapped on purpose: anything newer than this package.
+        _ => null,
+      };
 
   @override
   Stream<String> stream({

@@ -15,12 +15,13 @@ AiBroker (interface)        — broker.dart
 AiBrokerRegistry            — process-wide id → broker map
 ChatRequest / AiMessage     — message.dart (system is a top-level field, not a role)
 KeyResolver                 — key_resolver.dart (Env/Map, or implement your own)
-retryRequest()              — retry.dart (shared 429/503/529 backoff)
+retryRequest()              — retry.dart (shared backoff: 429/5xx/529 + network errors, Retry-After)
+AiCompletion / AiFinishReason — completion.dart (reply + finish reason + token counts)
 decodeSseStream()           — sse.dart (shared SSE parser; Gemini uses ?alt=sse)
 stripCodeFence()            — code_fence.dart (post-process model output)
 ```
 
-Wire shape: every broker implements the same 4 methods (`listModels`, `complete`, `chat`, `stream`). `complete` is just `chat` with a single `AiMessage.user(...)` — the default lives on the interface. `stream` events are *incremental deltas*; concatenating them yields the same string `chat` returns.
+Wire shape: every broker implements `listModels`, `chatWithMeta` and `stream` (brokers `extend AiBroker`). `chat`, `complete` and `completeWithMeta` are defaults on the interface built on `chatWithMeta`: `complete*` is `chat*` with a single `AiMessage.user(...)`, and the plain variants keep only `AiCompletion.text`. Each broker maps its provider's finish/stop reasons onto `AiFinishReason` in a private `_finishReasonOf`; unmapped values leave `finishReason` null and keep the raw string. `stream` events are *incremental deltas*; concatenating them yields the same string `chat` returns.
 
 Things deliberately *not* in this package — do not add without a real consumer asking:
 - No safety/SQL gates (call-site responsibility).
@@ -35,7 +36,7 @@ When editing or adding a broker, mind these — they're the things that diverge 
 - **System prompt placement.** OpenAI: `role:system` message. Anthropic: top-level `system` field. Gemini: top-level `systemInstruction` object. Keep `system` out of `ChatRequest.messages`.
 - **listModels filtering.** Each broker filters the catalog so picker UIs don't see embeddings/whisper/dall-e. OpenAI: `^(gpt-|o\d)`. Anthropic: no filter (sorted descending so newest claude lands first). Gemini: must start with `gemini-` and support `generateContent`; paginated up to 5×50.
 - **Streaming format.** OpenAI & Anthropic are SSE; Gemini is JSON-array by default and *must* be requested with `?alt=sse` so the shared `decodeSseStream` works. Anthropic uses named SSE events (`content_block_delta`, `message_stop`); OpenAI uses `data: [DONE]` to terminate; Gemini's SSE chunks share the same `candidates → content → parts → text` shape as the non-streaming response, so one extractor handles both.
-- **Retry policy.** Use `retryRequest` for every non-streaming call. Pass `isHardFailure` when a status code can mean either "retry" or "give up" — currently only OpenAI 429 (`quota` in body) needs this. SSE calls bypass retry (mid-stream restart isn't sound).
+- **Retry policy.** Use `retryRequest` for every non-streaming call. It retries 429/500/502/503/504/529, `ClientException` and `TimeoutException`, honouring `Retry-After` up to `maxRetryAfter`. Pass `isHardFailure` when a status code can mean either "retry" or "give up" — currently only OpenAI 429 (`quota` in body) needs this. SSE calls bypass retry (mid-stream restart isn't sound).
 - **Errors.** All broker-layer failures throw `AiBrokerException` (with optional `statusCode`). Don't leak provider-specific exception types out of the package.
 
 ## Internal import convention

@@ -382,4 +382,121 @@ void main() {
       });
     });
   });
+
+  group('GeminiBroker.completeWithMeta', () {
+    GeminiBroker brokerReplying(Map<String, Object?> body) => GeminiBroker(
+          client: MockClient((_) async => Response(jsonEncode(body), 200)),
+        );
+
+    Map<String, Object?> reply(String text, String? finishReason) => {
+          'candidates': [
+            {
+              'content': {
+                'parts': [
+                  {'text': text},
+                ],
+              },
+              if (finishReason != null) 'finishReason': finishReason,
+            },
+          ],
+          'usageMetadata': {
+            'promptTokenCount': 12,
+            'candidatesTokenCount': 34,
+            'thoughtsTokenCount': 5,
+            'totalTokenCount': 51,
+          },
+        };
+
+    Future<AiCompletion> run(GeminiBroker b) => b.completeWithMeta(
+          apiKey: 'g',
+          model: 'gemini-2.5-flash',
+          system: 's',
+          user: 'u',
+        );
+
+    test('carries text, finish reason and usage counts', () async {
+      final out = await run(brokerReplying(reply('{"a":1}', 'STOP')));
+      expect(out.text, '{"a":1}');
+      expect(out.rawFinishReason, 'STOP');
+      expect(out.finishReason, AiFinishReason.stop);
+      expect(out.inputTokens, 12);
+      // Gemini reports thinking apart from the reply; outputTokens counts
+      // both, the way the other providers do.
+      expect(out.outputTokens, 39);
+      expect(out.thinkingTokens, 5);
+    });
+
+    test('maps every documented Gemini finish reason', () async {
+      const expected = <String, AiFinishReason?>{
+        'STOP': AiFinishReason.stop,
+        'MAX_TOKENS': AiFinishReason.maxTokens,
+        'SAFETY': AiFinishReason.safety,
+        'BLOCKLIST': AiFinishReason.safety,
+        'PROHIBITED_CONTENT': AiFinishReason.safety,
+        'SPII': AiFinishReason.safety,
+        'IMAGE_SAFETY': AiFinishReason.safety,
+        'IMAGE_PROHIBITED_CONTENT': AiFinishReason.safety,
+        'RECITATION': AiFinishReason.recitation,
+        'IMAGE_RECITATION': AiFinishReason.recitation,
+        'LANGUAGE': AiFinishReason.unsupportedLanguage,
+        'MALFORMED_FUNCTION_CALL': AiFinishReason.toolCallError,
+        'UNEXPECTED_TOOL_CALL': AiFinishReason.toolCallError,
+        'TOO_MANY_TOOL_CALLS': AiFinishReason.toolCallError,
+        // Gemini's own "we don't know" values stay unmapped: the raw
+        // string is carried, the normalised field is null.
+        'OTHER': null,
+        'IMAGE_OTHER': null,
+        'FINISH_REASON_UNSPECIFIED': null,
+        'SOMETHING_NEW': null,
+      };
+      for (final entry in expected.entries) {
+        final out = await run(brokerReplying(reply('x', entry.key)));
+        expect(out.rawFinishReason, entry.key);
+        expect(out.finishReason, entry.value, reason: entry.key);
+      }
+    });
+
+    test('leaves the reason and counts null when Gemini omits them', () async {
+      final out = await run(
+        brokerReplying({
+          'candidates': [
+            {
+              'content': {
+                'parts': [
+                  {'text': 'x'},
+                ],
+              },
+            },
+          ],
+        }),
+      );
+      expect(out.rawFinishReason, isNull);
+      expect(out.finishReason, isNull);
+      expect(out.inputTokens, isNull);
+      expect(out.outputTokens, isNull);
+      expect(out.thinkingTokens, isNull);
+    });
+
+    test('names the finish reason when a truncated reply has no text',
+        () async {
+      await expectLater(
+        run(brokerReplying(reply('', 'MAX_TOKENS'))),
+        throwsA(
+          isA<AiBrokerException>()
+              .having((e) => e.message, 'message', contains('MAX_TOKENS')),
+        ),
+      );
+    });
+
+    test('complete returns the same text as completeWithMeta', () async {
+      final b = brokerReplying(reply('same', 'MAX_TOKENS'));
+      final text = await b.complete(
+        apiKey: 'g',
+        model: 'gemini-2.5-flash',
+        system: 's',
+        user: 'u',
+      );
+      expect(text, 'same');
+    });
+  });
 }
