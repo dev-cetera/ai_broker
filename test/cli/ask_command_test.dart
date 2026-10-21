@@ -19,7 +19,7 @@ import 'package:test/test.dart';
 /// Fake broker that handles both `embed` (for the query + the ingest)
 /// and `chat`/`stream` (for the answer). Captures the [ChatRequest] so
 /// tests can assert on the system prompt the CLI assembled.
-class _AskFake implements ChatBroker, EmbedBroker {
+class _AskFake extends ChatBroker implements EmbedBroker {
   ChatRequest? lastChatRequest;
   bool streamCalled = false;
   bool chatCalled = false;
@@ -31,17 +31,6 @@ class _AskFake implements ChatBroker, EmbedBroker {
 
   @override
   Future<List<String>> listModels(String apiKey) async => const [];
-
-  @override
-  Future<String> complete({
-    required String apiKey,
-    required String model,
-    required String system,
-    required String user,
-    double temperature = 0.3,
-    int maxTokens = 2048,
-  }) async =>
-      '';
 
   @override
   Future<List<List<double>>> embed({
@@ -62,14 +51,18 @@ class _AskFake implements ChatBroker, EmbedBroker {
   }
 
   @override
-  Future<String> chat({
+  Future<AiCompletion> chatWithMeta({
     required String apiKey,
     required String model,
     required ChatRequest request,
   }) async {
     chatCalled = true;
     lastChatRequest = request;
-    return 'cats love to nap.';
+    return const AiCompletion(
+      text: 'cats love to nap.',
+      rawFinishReason: null,
+      finishReason: null,
+    );
   }
 
   @override

@@ -16,7 +16,7 @@ import 'package:test/test.dart';
 
 /// Records the chat request the LlmTranslator hands over so we can
 /// assert on the system prompt structure.
-class _RecordingChat implements ChatBroker {
+class _RecordingChat extends ChatBroker {
   ChatRequest? captured;
   String? capturedModel;
   String answer = '  bonjour  '; // includes whitespace to verify trimming.
@@ -29,34 +29,18 @@ class _RecordingChat implements ChatBroker {
   Future<List<String>> listModels(String apiKey) async => const [];
 
   @override
-  Future<String> complete({
-    required String apiKey,
-    required String model,
-    required String system,
-    required String user,
-    double temperature = 0.3,
-    int maxTokens = 2048,
-  }) =>
-      chat(
-        apiKey: apiKey,
-        model: model,
-        request: ChatRequest.single(
-          system: system,
-          user: user,
-          temperature: temperature,
-          maxTokens: maxTokens,
-        ),
-      );
-
-  @override
-  Future<String> chat({
+  Future<AiCompletion> chatWithMeta({
     required String apiKey,
     required String model,
     required ChatRequest request,
   }) async {
     capturedModel = model;
     captured = request;
-    return answer;
+    return AiCompletion(
+      text: answer,
+      rawFinishReason: null,
+      finishReason: null,
+    );
   }
 
   @override

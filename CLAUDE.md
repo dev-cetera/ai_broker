@@ -18,12 +18,13 @@ lib/src/
   core/
     broker.dart                — AiBroker base, AiBrokerRegistry (with lookupAs<T>), AiBrokerException
     key_resolver.dart          — Env / Map / File / Chained resolvers; MissingKeyException
-    retry.dart                 — shared 429/503/529 backoff (retryRequest)
+    retry.dart                 — shared backoff: 429/5xx/529 + network errors, Retry-After (retryRequest)
     sse.dart                   — shared SSE parser (Gemini uses ?alt=sse)
     code_fence.dart            — stripCodeFence() post-processor
 
   chat/
-    chat_broker.dart           — ChatBroker interface (complete / chat / stream)
+    chat_broker.dart           — ChatBroker interface (chatWithMeta / stream; chat / complete* defaults)
+    completion.dart            — AiCompletion / AiFinishReason (reply + finish reason + token counts)
     message.dart               — ChatRequest / AiMessage (system is on ChatRequest, not a role)
 
   embed/
@@ -55,7 +56,7 @@ lib/src/
     collections_command.dart   — CollectionsCommand
 ```
 
-### Capability-split brokers (0.3.0+)
+### Capability-split brokers (0.4.0+)
 
 `AiBroker` is the base — `id`, `label`, `listModels` only. Capabilities live on separate interfaces in per-modality folders:
 
@@ -67,9 +68,9 @@ lib/src/
 | `GoogleTranslateBroker` | `TranslateBroker` (no chat models — `listModels` returns `[]`) |
 | `LlmTranslator` | `TranslateBroker` — wraps any `ChatBroker` so chat models can translate |
 
-Why split: no `UnsupportedError` stubs — the type system enforces "you can only call `embed` on something that's actually an `EmbedBroker`". Use `AiBrokerRegistry.lookupAs<T>(id)` for capability-typed lookup; it returns `null` when the broker doesn't implement `T`. **This is breaking vs 0.2.x** — `broker.chat(...)` against a variable typed as `AiBroker` no longer compiles; either declare the variable as the capability type, cast, or use `lookupAs`.
+Why split: no `UnsupportedError` stubs — the type system enforces "you can only call `embed` on something that's actually an `EmbedBroker`". Use `AiBrokerRegistry.lookupAs<T>(id)` for capability-typed lookup; it returns `null` when the broker doesn't implement `T`. **This is breaking vs 0.3.x** (0.3.0 was published from the pre-split line, with the chat methods still on `AiBroker`) — `broker.chat(...)` against a variable typed as `AiBroker` no longer compiles; either declare the variable as the capability type, cast, or use `lookupAs`.
 
-Wire shape: `complete` is just `chat` with a single `AiMessage.user(...)` — the default implementation lives on `ChatBroker`. `stream` events are *incremental deltas*; concatenating them yields the same string `chat` returns.
+Wire shape: every chat broker implements `listModels`, `chatWithMeta` and `stream` (brokers `extend ChatBroker`). `chat`, `complete` and `completeWithMeta` are defaults on `ChatBroker` built on `chatWithMeta`: `complete*` is `chat*` with a single `AiMessage.user(...)`, and the plain variants keep only `AiCompletion.text`. A class that `implements ChatBroker` (e.g. a test fake) gets no defaults and must supply all five. Each broker maps its provider's finish/stop reasons onto `AiFinishReason` in a private `_finishReasonOf`; unmapped values leave `finishReason` null and keep the raw string. `stream` events are *incremental deltas*; concatenating them yields the same string `chat` returns.
 
 The CLI is built on these same library types — anything the CLI does, an app importing the library can do. CLI commands accept `brokerFactory` + `keyResolver` constructor parameters specifically as test seams so they never hit a real provider.
 
@@ -87,7 +88,7 @@ When editing or adding a broker, mind these — they're the things that diverge 
 - **System prompt placement.** OpenAI: `role:system` message. Anthropic: top-level `system` field. Gemini: top-level `systemInstruction` object. Keep `system` out of `ChatRequest.messages` — it's a top-level field on `ChatRequest`.
 - **`listModels` filtering.** Each broker filters the catalog so picker UIs don't see embeddings / whisper / dall-e. OpenAI: `^(gpt-|o\d)`. Anthropic: no filter (sorted descending so newest claude lands first). Gemini: must start with `gemini-` and support `generateContent`; paginated up to 5×50. `GoogleTranslateBroker.listModels` always returns `[]` (v2 has no `/models`).
 - **Streaming format.** OpenAI & Anthropic are SSE; Gemini is JSON-array by default and *must* be requested with `?alt=sse` so the shared `decodeSseStream` works. Anthropic uses named SSE events (`content_block_delta`, `message_stop`); OpenAI uses `data: [DONE]` to terminate; Gemini's SSE chunks share the same `candidates → content → parts → text` shape as the non-streaming response, so one extractor handles both.
-- **Retry policy.** Use `retryRequest` for every non-streaming call. Pass `isHardFailure` when a status code can mean either "retry" or "give up" — currently only OpenAI 429 (`quota` in body) needs this. SSE calls bypass retry (mid-stream restart isn't sound).
+- **Retry policy.** Use `retryRequest` for every non-streaming call. It retries 429/500/502/503/504/529 and `ClientException` (network failures), honouring `Retry-After` (seconds or HTTP-date) up to `maxRetryAfter`. A `TimeoutException` is deliberately *not* retried — the provider may still be generating (and billing) the request. Pass `isHardFailure` when a status code can mean either "retry" or "give up" — currently only OpenAI 429 (`quota` in body) needs this. SSE calls bypass retry (mid-stream restart isn't sound).
 - **Embed per-call limits.** OpenAI `text-embedding-3-*`: ≤2048 inputs, ≤300k tokens per request, ≤8191 tokens each. Gemini `text-embedding-004`: ≤100 per call. The broker just forwards the list — use the higher-level `Embedder` to batch.
 - **Google Translate glossary.** Cloud Translation v2 doesn't expose v3's server-side glossary resource, so `GoogleTranslateBroker` implements glossary client-side via `<span translate="no">…</span>` HTML wrapping with `format: 'html'`. Source text + glossary targets are HTML-escaped before sending; entities in the response are decoded back. Matching is exact, case-sensitive, substring — provide every casing you care about and use distinctive terms. On overlap the longer key wins; otherwise the earliest match wins. `domain` / `tone` / `context` hints are silently accepted but ignored by v2 — use `LlmTranslator` when they matter.
 - **Errors.** All broker-layer failures throw `AiBrokerException` (with optional `statusCode`). Don't leak provider-specific exception types out of the package.
@@ -96,7 +97,7 @@ When editing or adding a broker, mind these — they're the things that diverge 
 
 Files under `lib/src/` import the package umbrella as `import '/_common.dart';` (absolute, not relative). `_common.dart` re-exports the third-party APIs the package uses (`http`, `meta`, `dart:async` / `convert` / `io`) plus the generated barrel. Add new ambient imports there, not per-file.
 
-`lib/src/_index.g.dart` is **generated** by `df_generate_dart_indexes` — do not hand-edit; add new files to `lib/src/` (in any sub-folder) and the generator picks them up. `lib/ai_broker.dart` re-exports it as the package's public surface.
+`lib/src/_src.dart` is the barrel **generated** by `df_generate_dart_indexes` — do not hand-edit. After adding a file under `lib/src/` (in any sub-folder), run `dart pub global run df_generate_dart_indexes -i .` inside `lib/src/`; it writes `_index.g.dart`, whose contents replace `_src.dart` (then delete `_index.g.dart`). `lib/ai_broker.dart` re-exports `_src.dart` as the package's public surface.
 
 ## Common commands
 

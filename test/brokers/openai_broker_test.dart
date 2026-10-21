@@ -450,4 +450,58 @@ void main() {
       });
     });
   });
+
+  group('OpenAiBroker.completeWithMeta', () {
+    OpenAiBroker brokerReplying(Map<String, Object?> body) => OpenAiBroker(
+          client: MockClient((_) async => Response(jsonEncode(body), 200)),
+        );
+
+    Map<String, Object?> reply(String? finishReason) => {
+          'choices': [
+            {
+              'message': {'role': 'assistant', 'content': ' hi '},
+              'finish_reason': finishReason,
+            },
+          ],
+          'usage': {
+            'prompt_tokens': 3,
+            'completion_tokens': 4,
+            'total_tokens': 7,
+            'completion_tokens_details': {'reasoning_tokens': 2},
+          },
+        };
+
+    Future<AiCompletion> run(OpenAiBroker b) => b.completeWithMeta(
+          apiKey: 'k',
+          model: 'gpt-x',
+          system: 's',
+          user: 'u',
+        );
+
+    test('carries text, finish reason and usage counts', () async {
+      final out = await run(brokerReplying(reply('length')));
+      expect(out.text, 'hi');
+      expect(out.rawFinishReason, 'length');
+      expect(out.finishReason, AiFinishReason.maxTokens);
+      expect(out.inputTokens, 3);
+      expect(out.outputTokens, 4);
+      expect(out.thinkingTokens, 2);
+    });
+
+    test('maps every documented OpenAI finish reason', () async {
+      const expected = <String, AiFinishReason?>{
+        'stop': AiFinishReason.stop,
+        'length': AiFinishReason.maxTokens,
+        'content_filter': AiFinishReason.safety,
+        'tool_calls': AiFinishReason.toolUse,
+        'function_call': AiFinishReason.toolUse,
+        'something_new': null,
+      };
+      for (final entry in expected.entries) {
+        final out = await run(brokerReplying(reply(entry.key)));
+        expect(out.rawFinishReason, entry.key);
+        expect(out.finishReason, entry.value, reason: entry.key);
+      }
+    });
+  });
 }

@@ -38,7 +38,7 @@ The RAG layer is the same principle applied a level up: chunk, embed, store,
 retrieve, ground. One pipeline that works against any of the supported embed
 providers, with the chat broker chosen independently.
 
-## Broker interfaces (capability-split, 0.3.0+)
+## Broker interfaces (capability-split, 0.4.0+)
 
 Each capability is its own interface. Providers implement only the ones
 their service actually supports — no "throws UnsupportedError" stubs.
@@ -53,6 +53,8 @@ abstract class AiBroker {                       // base: id, label, listModels
 abstract class ChatBroker implements AiBroker {
   Future<String> complete({ ... });                                    // single-shot
   Future<String> chat({ ... ChatRequest request });                    // multi-turn
+  Future<AiCompletion> completeWithMeta({ ... });                      // + finish reason, token counts
+  Future<AiCompletion> chatWithMeta({ ... ChatRequest request });      // the one call every chat broker implements
   Stream<String> stream({ ... ChatRequest request });                  // token-by-token
 }
 
@@ -67,6 +69,18 @@ abstract class EmbedBroker implements AiBroker {
 | `AnthropicBroker` | `ChatBroker` (no embed — Anthropic has no first-party embeddings) |
 | `GeminiBroker` | `ChatBroker` + `EmbedBroker` |
 
+`completeWithMeta` / `chatWithMeta` return an `AiCompletion`: the text,
+the provider's raw finish reason (`'STOP'`, `'end_turn'`, `'length'`, …),
+that reason mapped onto `AiFinishReason` (`null` when unmapped), and the
+input / output / thinking token counts. Check
+`finishReason == AiFinishReason.maxTokens` to tell a reply cut off at the
+token limit from a complete one.
+
+Every non-streaming call retries 429 / 500 / 502 / 503 / 504 / 529 and
+transient network errors with exponential backoff, honouring
+`Retry-After` (capped at 60 s). A timed-out request is not retried — the
+provider may still be generating (and billing) it.
+
 Wire once via `AiBrokerRegistry`, look up by id thereafter. For
 capability-typed lookups use `lookupAs<T>` — returns `null` when the
 broker doesn't implement the requested capability:
@@ -79,8 +93,9 @@ final embed = AiBrokerRegistry.instance.lookupAs<EmbedBroker>('openai');
 // → OpenAiBroker (typed as EmbedBroker)
 ```
 
-> **Breaking change vs 0.2.x.** `chat` / `stream` / `complete` / `embed`
-> were on `AiBroker` directly. Code like `broker.chat(...)` against a
+> **Breaking change vs 0.3.x.** `chat` / `stream` / `complete` (and
+> 0.3.0's `chatWithMeta` / `completeWithMeta`) were on `AiBroker`
+> directly. Code like `broker.chat(...)` against a
 > variable typed as `AiBroker` no longer compiles — either declare the
 > variable as `ChatBroker` / `EmbedBroker`, cast at the call site, or
 > use `lookupAs<ChatBroker>('id')` from the registry.

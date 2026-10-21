@@ -66,6 +66,36 @@ void main() {
       expect(stripCodeFence('`inline`'), '`inline`');
     });
 
+    test('extracts a fenced block preceded by prose', () {
+      const input = 'Here is the JSON you asked for:\n\n```json\n{"a": 1}\n```';
+      expect(stripCodeFence(input), '{"a": 1}');
+    });
+
+    test('extracts a fenced block followed by prose', () {
+      const input = '```json\n{"a": 1}\n```\n\nLet me know if you need more.';
+      expect(stripCodeFence(input), '{"a": 1}');
+    });
+
+    test('extracts a bare fenced block surrounded by prose', () {
+      const input = 'Sure!\n```\nhello\nworld\n```\nDone.';
+      expect(stripCodeFence(input), 'hello\nworld');
+    });
+
+    test('extracts the first block when there are several', () {
+      const input = 'One:\n```\nfirst\n```\nTwo:\n```\nsecond\n```';
+      expect(stripCodeFence(input), 'first');
+    });
+
+    test('takes everything after an opening fence that never closes', () {
+      const input = 'Here you go:\n```json\n{"a": 1';
+      expect(stripCodeFence(input), '{"a": 1');
+    });
+
+    test('ignores a fence that is not at the start of a line', () {
+      const input = 'Use ```code``` inline, please.';
+      expect(stripCodeFence(input), input);
+    });
+
     test('handles multi-line body with multiple language hints', () {
       const input = '```typescript\nconst x = 1;\nconst y = 2;\n```';
       expect(stripCodeFence(input), 'const x = 1;\nconst y = 2;');

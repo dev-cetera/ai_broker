@@ -72,7 +72,7 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
   }
 
   @override
-  Future<String> chat({
+  Future<AiCompletion> chatWithMeta({
     required String apiKey,
     required String model,
     required ChatRequest request,
@@ -93,8 +93,52 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
       providerLabel: 'Gemini',
     );
     final json = jsonDecode(res.body) as Map<String, Object?>;
-    return _extractText(json);
+    final candidates = json['candidates'] as List<Object?>? ?? const [];
+    final rawFinishReason = candidates.isEmpty
+        ? null
+        : (candidates.first as Map<String, Object?>)['finishReason'] as String?;
+    final usage = json['usageMetadata'] as Map<String, Object?>?;
+    final replyTokens = usage?['candidatesTokenCount'] as int?;
+    final thinkingTokens = usage?['thoughtsTokenCount'] as int?;
+    return AiCompletion(
+      text: _extractText(json, finishReason: rawFinishReason),
+      rawFinishReason: rawFinishReason,
+      finishReason:
+          rawFinishReason == null ? null : _finishReasonOf(rawFinishReason),
+      inputTokens: usage?['promptTokenCount'] as int?,
+      // Gemini counts thinking apart from the reply; [AiCompletion]
+      // counts both as output, the way Anthropic and OpenAI do.
+      outputTokens: replyTokens == null && thinkingTokens == null
+          ? null
+          : (replyTokens ?? 0) + (thinkingTokens ?? 0),
+      thinkingTokens: thinkingTokens,
+    );
   }
+
+  /// Maps Gemini's `finishReason` onto [AiFinishReason]. Returns `null` for
+  /// `OTHER`, `IMAGE_OTHER`, `NO_IMAGE`, `FINISH_REASON_UNSPECIFIED` and any
+  /// value this package does not know; the raw string is still carried on
+  /// [AiCompletion.rawFinishReason].
+  static AiFinishReason? _finishReasonOf(String raw) => switch (raw) {
+        'STOP' => AiFinishReason.stop,
+        'MAX_TOKENS' => AiFinishReason.maxTokens,
+        'SAFETY' ||
+        'BLOCKLIST' ||
+        'PROHIBITED_CONTENT' ||
+        'SPII' ||
+        'IMAGE_SAFETY' ||
+        'IMAGE_PROHIBITED_CONTENT' =>
+          AiFinishReason.safety,
+        'RECITATION' || 'IMAGE_RECITATION' => AiFinishReason.recitation,
+        'LANGUAGE' => AiFinishReason.unsupportedLanguage,
+        'MALFORMED_FUNCTION_CALL' ||
+        'UNEXPECTED_TOOL_CALL' ||
+        'TOO_MANY_TOOL_CALLS' =>
+          AiFinishReason.toolCallError,
+        // Unmapped on purpose: Gemini's own "other / unspecified" values,
+        // and anything newer than this package.
+        _ => null,
+      };
 
   @override
   Stream<String> stream({
@@ -127,7 +171,14 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
   /// Pulls text out of either a `generateContent` response or a
   /// `streamGenerateContent` chunk. They share the same `candidates →
   /// content → parts → text` shape, so one extractor handles both.
-  String _extractText(Map<String, Object?> json, {bool allowEmpty = false}) {
+  ///
+  /// [finishReason] only feeds the error message, so an empty reply cut off
+  /// at the token limit says so.
+  String _extractText(
+    Map<String, Object?> json, {
+    bool allowEmpty = false,
+    String? finishReason,
+  }) {
     final candidates = json['candidates'] as List<Object?>? ?? const [];
     if (candidates.isEmpty) {
       if (allowEmpty) return '';
@@ -143,7 +194,11 @@ class GeminiBroker extends ChatBroker implements EmbedBroker {
     }
     final out = buf.toString();
     if (out.isEmpty && !allowEmpty) {
-      throw const AiBrokerException('Gemini returned empty text.');
+      throw AiBrokerException(
+        finishReason == null
+            ? 'Gemini returned empty text.'
+            : 'Gemini returned empty text (finishReason: $finishReason).',
+      );
     }
     return out;
   }

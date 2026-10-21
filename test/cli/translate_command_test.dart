@@ -62,7 +62,7 @@ class _FakeTranslate implements TranslateBroker {
 }
 
 /// Fake chat broker for the `--broker openai` (LLM-translator) path.
-class _FakeChat implements ChatBroker {
+class _FakeChat extends ChatBroker {
   ChatRequest? captured;
   String? capturedModel;
 
@@ -74,34 +74,18 @@ class _FakeChat implements ChatBroker {
   Future<List<String>> listModels(String apiKey) async => const [];
 
   @override
-  Future<String> complete({
-    required String apiKey,
-    required String model,
-    required String system,
-    required String user,
-    double temperature = 0.3,
-    int maxTokens = 2048,
-  }) =>
-      chat(
-        apiKey: apiKey,
-        model: model,
-        request: ChatRequest.single(
-          system: system,
-          user: user,
-          temperature: temperature,
-          maxTokens: maxTokens,
-        ),
-      );
-
-  @override
-  Future<String> chat({
+  Future<AiCompletion> chatWithMeta({
     required String apiKey,
     required String model,
     required ChatRequest request,
   }) async {
     capturedModel = model;
     captured = request;
-    return 'llm translation';
+    return const AiCompletion(
+      text: 'llm translation',
+      rawFinishReason: null,
+      finishReason: null,
+    );
   }
 
   @override

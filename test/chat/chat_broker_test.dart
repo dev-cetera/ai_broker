@@ -14,9 +14,11 @@
 import 'package:ai_broker/ai_broker.dart';
 import 'package:test/test.dart';
 
-/// Captures the [ChatRequest] passed to [chat] so we can assert the
-/// default [ChatBroker.complete] delegates correctly.
-class _CapturingChat implements ChatBroker {
+/// Implements only the primitives ([chatWithMeta] + [stream]), so
+/// [ChatBroker.chat], [ChatBroker.complete] and
+/// [ChatBroker.completeWithMeta] come from the defaults on [ChatBroker].
+/// Captures the [ChatRequest] each call sends.
+class _CapturingChat extends ChatBroker {
   ChatRequest? captured;
 
   @override
@@ -26,37 +28,20 @@ class _CapturingChat implements ChatBroker {
   @override
   Future<List<String>> listModels(String apiKey) async => const [];
 
-  // Re-declare `complete` exactly as on the interface so the default
-  // delegation lands here. Dart's `implements` doesn't inherit default
-  // method bodies, so without this the class would be abstract.
   @override
-  Future<String> complete({
-    required String apiKey,
-    required String model,
-    required String system,
-    required String user,
-    double temperature = 0.3,
-    int maxTokens = 2048,
-  }) =>
-      chat(
-        apiKey: apiKey,
-        model: model,
-        request: ChatRequest.single(
-          system: system,
-          user: user,
-          temperature: temperature,
-          maxTokens: maxTokens,
-        ),
-      );
-
-  @override
-  Future<String> chat({
+  Future<AiCompletion> chatWithMeta({
     required String apiKey,
     required String model,
     required ChatRequest request,
   }) async {
     captured = request;
-    return '<<captured>>';
+    return const AiCompletion(
+      text: '<<captured>>',
+      rawFinishReason: 'max_tokens',
+      finishReason: AiFinishReason.maxTokens,
+      inputTokens: 1,
+      outputTokens: 2,
+    );
   }
 
   @override
@@ -70,7 +55,7 @@ class _CapturingChat implements ChatBroker {
 
 void main() {
   group('ChatBroker.complete default impl', () {
-    test('delegates to chat() with a single-user-message ChatRequest',
+    test('delegates to chatWithMeta() with a single-user-message ChatRequest',
         () async {
       final b = _CapturingChat();
       final out = await b.complete(
@@ -99,6 +84,44 @@ void main() {
       );
       expect(b.captured!.temperature, 0.7);
       expect(b.captured!.maxTokens, 512);
+    });
+  });
+
+  group('ChatBroker *WithMeta defaults', () {
+    test('completeWithMeta sends one user message through chatWithMeta',
+        () async {
+      final b = _CapturingChat();
+      final out = await b.completeWithMeta(
+        apiKey: 'k',
+        model: 'm',
+        system: 'sys',
+        user: 'hi',
+        temperature: 0.5,
+        maxTokens: 64,
+      );
+      expect(out.text, '<<captured>>');
+      expect(out.finishReason, AiFinishReason.maxTokens);
+      final sent = b.captured!;
+      expect(sent.system, 'sys');
+      expect(sent.messages.single.content, 'hi');
+      expect(sent.temperature, 0.5);
+      expect(sent.maxTokens, 64);
+    });
+
+    test('complete and chat return the text of the meta call', () async {
+      final b = _CapturingChat();
+      expect(
+        await b.complete(apiKey: 'k', model: 'm', system: 's', user: 'u'),
+        '<<captured>>',
+      );
+      expect(
+        await b.chat(
+          apiKey: 'k',
+          model: 'm',
+          request: ChatRequest.single(system: 's', user: 'u'),
+        ),
+        '<<captured>>',
+      );
     });
   });
 }

@@ -24,8 +24,9 @@
 /// compile time and makes "what does this provider support?" answerable
 /// by reading the class declaration instead of grepping for throws.
 ///
-/// **Breaking change in 0.3.0.** Pre-0.3, `chat` / `stream` / `complete`
-/// / `embed` all lived on [AiBroker]. Now they live on `ChatBroker` /
+/// **Breaking change in 0.4.0.** Pre-0.4, `chat` / `stream` / `complete`
+/// (and, in 0.3.0, `chatWithMeta` / `completeWithMeta`) lived on
+/// [AiBroker]. Now they live on `ChatBroker`, and `embed` on
 /// `EmbedBroker`. Callers either upgrade their variable's declared
 /// type (`ChatBroker broker = …`) or cast at the call site
 /// (`(broker as EmbedBroker).embed(…)`). [AiBrokerRegistry.lookupAs]

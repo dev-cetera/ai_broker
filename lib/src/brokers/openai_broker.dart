@@ -58,7 +58,7 @@ class OpenAiBroker extends ChatBroker implements EmbedBroker {
   }
 
   @override
-  Future<String> chat({
+  Future<AiCompletion> chatWithMeta({
     required String apiKey,
     required String model,
     required ChatRequest request,
@@ -87,11 +87,40 @@ class OpenAiBroker extends ChatBroker implements EmbedBroker {
     final first = choices.first as Map<String, Object?>;
     final message = first['message'] as Map<String, Object?>?;
     final content = message?['content'] as String?;
+    final rawFinishReason = first['finish_reason'] as String?;
     if (content == null || content.isEmpty) {
-      throw const AiBrokerException('OpenAI returned empty content.');
+      throw AiBrokerException(
+        rawFinishReason == null
+            ? 'OpenAI returned empty content.'
+            : 'OpenAI returned empty content '
+                '(finish_reason: $rawFinishReason).',
+      );
     }
-    return content.trim();
+    final usage = json['usage'] as Map<String, Object?>?;
+    final details =
+        usage?['completion_tokens_details'] as Map<String, Object?>?;
+    return AiCompletion(
+      text: content.trim(),
+      rawFinishReason: rawFinishReason,
+      finishReason:
+          rawFinishReason == null ? null : _finishReasonOf(rawFinishReason),
+      inputTokens: usage?['prompt_tokens'] as int?,
+      outputTokens: usage?['completion_tokens'] as int?,
+      thinkingTokens: details?['reasoning_tokens'] as int?,
+    );
   }
+
+  /// Maps OpenAI's `finish_reason` onto [AiFinishReason]. Returns `null`
+  /// for a value this package does not know; the raw string is still
+  /// carried on [AiCompletion.rawFinishReason].
+  static AiFinishReason? _finishReasonOf(String raw) => switch (raw) {
+        'stop' => AiFinishReason.stop,
+        'length' => AiFinishReason.maxTokens,
+        'content_filter' => AiFinishReason.safety,
+        'tool_calls' || 'function_call' => AiFinishReason.toolUse,
+        // Unmapped on purpose: anything newer than this package.
+        _ => null,
+      };
 
   @override
   Stream<String> stream({
