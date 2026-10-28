@@ -1,5 +1,11 @@
 # Changelog
 
+
+## [0.5.0]
+
+- chore: standardize README and CI/CD workflows, remove donation links, update contact info and repository links
+- chore: resolve analyzer issues
+
 ## 0.4.0
 
 Also includes everything in 0.3.0 below (`completeWithMeta` /

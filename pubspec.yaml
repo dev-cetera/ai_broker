@@ -14,15 +14,11 @@
 name: ai_broker
 homepage: https://dev-cetera.com/
 repository: https://github.com/dev-cetera/ai_broker
-funding:
-  - https://buymeacoffee.com/dev_cetera
-  - https://www.patreon.com/robelator
-  - https://github.com/sponsors/robelator
 description: >-
   Provider-agnostic Dart broker for Claude, OpenAI, Gemini, and Google
   Translate. Chat, embed, translate, plus a RAG CLI over a local
   SQLite vector store.
-version: 0.4.0
+version: 0.5.0
 topics:
   - ai
   - llm
