@@ -18,7 +18,7 @@ description: >-
   Provider-agnostic Dart broker for Claude, OpenAI, Gemini, and Google
   Translate. Chat, embed, translate, plus a RAG CLI over a local
   SQLite vector store.
-version: 0.5.0
+version: 0.5.1
 topics:
   - ai
   - llm
