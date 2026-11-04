@@ -14,7 +14,10 @@
 import 'dart:math' as math;
 import 'dart:typed_data';
 
-import 'package:sqlite3/sqlite3.dart';
+// Native SQLite where dart:ffi exists; a throwing stand-in on the web so
+// the package barrel still compiles there.
+import '_sqlite3_unsupported.dart'
+    if (dart.library.ffi) 'package:sqlite3/sqlite3.dart';
 
 import '/_common.dart';
 

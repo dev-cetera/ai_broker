@@ -79,7 +79,7 @@ Things deliberately *not* in this package — do not add without a real consumer
 - No tools / function calling.
 - No reranker in the RAG layer — cosine top-K only. Add cross-encoder / Cohere Rerank at the call site if quality demands it.
 - No Flutter widgets. Build pickers / chat UIs / settings dialogs on top in the consuming app.
-- No web support for the RAG layer. `CorpusStore` depends on native `package:sqlite3`. The chat / embed / translate APIs are pure Dart and work on web; the storage layer is native-only today.
+- No web support for the RAG layer. `CorpusStore` depends on native `package:sqlite3`. The chat / embed / translate APIs are pure Dart and work on web; the storage layer is native-only today. `corpus_store.dart` imports `package:sqlite3` only `if (dart.library.ffi)` and falls back to `rag/_sqlite3_unsupported.dart` (throws on open) so the barrel still compiles on web. Never import `package:sqlite3` (or anything `dart:ffi`) unconditionally from `lib/` — it breaks every web consumer, e.g. `df_localization`. If `corpus_store.dart` starts using more of the sqlite3 API, add it to the stub.
 
 ### Per-provider gotchas
 
