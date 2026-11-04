@@ -1,6 +1,10 @@
 # Changelog
 
 
+## [0.5.2]
+
+- fix: The package now compiles for the web (dart2js and dart2wasm). `CorpusStore` imported `package:sqlite3/sqlite3.dart`, which needs `dart:ffi`, and the barrel exports it, so any web app importing `package:ai_broker/ai_broker.dart`, even just for the chat brokers, failed to build. The import is now conditional on `dart.library.ffi`. On the web a stand-in is used and opening a `CorpusStore` throws `UnsupportedError`. Chat, embed and translate work on the web; the RAG store is still native-only. No API change on native.
+
 ## [0.5.0]
 
 - chore: standardize README and CI/CD workflows, remove donation links, update contact info and repository links
