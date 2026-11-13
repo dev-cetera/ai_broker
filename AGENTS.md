@@ -21,11 +21,16 @@ lib/src/
     retry.dart                 — shared backoff: 429/5xx/529 + network errors, Retry-After (retryRequest)
     sse.dart                   — shared SSE parser (Gemini uses ?alt=sse)
     code_fence.dart            — stripCodeFence() post-processor
+    key_check.dart             — KeyCheckBroker / AiKeyCheck / checkKeyByRequest (valid vs invalid vs unreachable)
+    _env.dart                  — readEnvironment(): Platform.environment on native, null on the web (internal)
 
   chat/
-    chat_broker.dart           — ChatBroker interface (chatWithMeta / stream; chat / complete* defaults)
-    completion.dart            — AiCompletion / AiFinishReason (reply + finish reason + token counts)
+    chat_broker.dart           — ChatBroker interface (chatWithMeta / stream abstract; chat / complete* /
+                                 streamWithMeta defaults)
+    completion.dart            — AiCompletion / AiFinishReason / StreamedCompletion / AiEffort
+    json_schema.dart           — toGeminiSchema / toOpenAiStrictSchema (pure, no I/O)
     message.dart               — ChatRequest / AiMessage (system is on ChatRequest, not a role)
+    tool.dart                  — AiTool / AiToolChoice / AiToolCall / decodeToolArguments
 
   embed/
     embed_broker.dart          — EmbedBroker interface
@@ -36,7 +41,9 @@ lib/src/
     llm_translator.dart        — wraps any ChatBroker as a TranslateBroker
 
   brokers/
-    openai_broker.dart         — OpenAiBroker (ChatBroker + EmbedBroker)
+    openai_compatible_broker.dart — OpenAiCompatibleBroker (ChatBroker + KeyCheckBroker) for any OpenAI-style API
+    openai_broker.dart         — OpenAiBroker (preset of the above + EmbedBroker)
+    deepseek_broker.dart       — DeepSeekBroker (preset; chat only, JSON mode instead of json_schema)
     anthropic_broker.dart      — AnthropicBroker (ChatBroker only — no first-party embeddings)
     gemini_broker.dart         — GeminiBroker (ChatBroker + EmbedBroker)
     google_translate_broker.dart — GoogleTranslateBroker (TranslateBroker only; Cloud Translation v2)
@@ -62,23 +69,26 @@ lib/src/
 
 | Provider | Implements |
 |----------|-----------|
-| `OpenAiBroker` | `ChatBroker` + `EmbedBroker` |
-| `AnthropicBroker` | `ChatBroker` |
-| `GeminiBroker` | `ChatBroker` + `EmbedBroker` |
-| `GoogleTranslateBroker` | `TranslateBroker` (no chat models — `listModels` returns `[]`) |
+| `OpenAiCompatibleBroker` | `ChatBroker` + `KeyCheckBroker` (any OpenAI-style API: id, label, baseUrl, model filter) |
+| `OpenAiBroker` | `ChatBroker` + `EmbedBroker` + `KeyCheckBroker` (preset of `OpenAiCompatibleBroker`) |
+| `DeepSeekBroker` | `ChatBroker` + `KeyCheckBroker` (preset of `OpenAiCompatibleBroker`) |
+| `AnthropicBroker` | `ChatBroker` + `KeyCheckBroker` |
+| `GeminiBroker` | `ChatBroker` + `EmbedBroker` + `KeyCheckBroker` |
+| `GoogleTranslateBroker` | `TranslateBroker` + `KeyCheckBroker` (no chat models — `listModels` returns `[]`) |
 | `LlmTranslator` | `TranslateBroker` — wraps any `ChatBroker` so chat models can translate |
 
 Why split: no `UnsupportedError` stubs — the type system enforces "you can only call `embed` on something that's actually an `EmbedBroker`". Use `AiBrokerRegistry.lookupAs<T>(id)` for capability-typed lookup; it returns `null` when the broker doesn't implement `T`. **This is breaking vs 0.3.x** (0.3.0 was published from the pre-split line, with the chat methods still on `AiBroker`) — `broker.chat(...)` against a variable typed as `AiBroker` no longer compiles; either declare the variable as the capability type, cast, or use `lookupAs`.
 
-Wire shape: every chat broker implements `listModels`, `chatWithMeta` and `stream` (brokers `extend ChatBroker`). `chat`, `complete` and `completeWithMeta` are defaults on `ChatBroker` built on `chatWithMeta`: `complete*` is `chat*` with a single `AiMessage.user(...)`, and the plain variants keep only `AiCompletion.text`. A class that `implements ChatBroker` (e.g. a test fake) gets no defaults and must supply all five. Each broker maps its provider's finish/stop reasons onto `AiFinishReason` in a private `_finishReasonOf`; unmapped values leave `finishReason` null and keep the raw string. `stream` events are *incremental deltas*; concatenating them yields the same string `chat` returns.
+Wire shape: every chat broker implements `listModels`, `chatWithMeta` and `stream` (brokers `extend ChatBroker`). `chat`, `complete`, `completeWithMeta` and `streamWithMeta` are defaults on `ChatBroker`: `complete*` is `chat*` with a single `AiMessage.user(...)`, and the plain variants keep only `AiCompletion.text`. `chatWithMeta` reports a turn with no text (a refusal, a truncated reply, a tool-only turn); only `chat` throws for it, using the overridable `providerName` and `emptyReplyPhrase` so the established messages (`OpenAI returned empty content`, `Anthropic returned empty text`) still match. A class that `implements ChatBroker` (e.g. a test fake) gets no defaults and must supply all five. Each broker maps its provider's finish/stop reasons onto `AiFinishReason` in a private `_finishReasonOf`; unmapped values leave `finishReason` null and keep the raw string. `stream` events are *incremental deltas*; concatenating them yields the same string `chat` returns.
 
 The CLI is built on these same library types — anything the CLI does, an app importing the library can do. CLI commands accept `brokerFactory` + `keyResolver` constructor parameters specifically as test seams so they never hit a real provider.
 
 Things deliberately *not* in this package — do not add without a real consumer asking:
 - No safety / SQL gate. Prompt sanitisation, output filtering, content moderation — call-site concern.
-- No tools / function calling.
+- No tool *execution*. Tool calling exists (0.7.0+) — declare, read back, feed results in — but running the tool, sandboxing it and looping until the model stops asking are all call-site concerns. Don't add a dispatcher here.
 - No reranker in the RAG layer — cosine top-K only. Add cross-encoder / Cohere Rerank at the call site if quality demands it.
 - No Flutter widgets. Build pickers / chat UIs / settings dialogs on top in the consuming app.
+- **Web safety.** The chat / embed / translate / key-check paths must run in a browser: never read `Platform` (use `readEnvironment` from `core/_env.dart`) or any other `dart:io` API at runtime outside `EnvKeyResolver`, `FileKeyResolver` and the CLI. Check with `dart compile js` on a file that constructs every broker. For browser calls, `AnthropicBroker(browserAccess: true)` sends Anthropic's CORS opt-in header; other providers decide CORS on their side.
 - No web support for the RAG layer. `CorpusStore` depends on native `package:sqlite3`. The chat / embed / translate APIs are pure Dart and work on web; the storage layer is native-only today. `corpus_store.dart` imports `package:sqlite3` only `if (dart.library.ffi)` and falls back to `rag/_sqlite3_unsupported.dart` (throws on open) so the barrel still compiles on web. Never import `package:sqlite3` (or anything `dart:ffi`) unconditionally from `lib/` — it breaks every web consumer, e.g. `df_localization`. If `corpus_store.dart` starts using more of the sqlite3 API, add it to the stub.
 
 ### Per-provider gotchas
@@ -86,11 +96,59 @@ Things deliberately *not* in this package — do not add without a real consumer
 When editing or adding a broker, mind these — they're the things that diverge across providers:
 
 - **System prompt placement.** OpenAI: `role:system` message. Anthropic: top-level `system` field. Gemini: top-level `systemInstruction` object. Keep `system` out of `ChatRequest.messages` — it's a top-level field on `ChatRequest`.
-- **`listModels` filtering.** Each broker filters the catalog so picker UIs don't see embeddings / whisper / dall-e. OpenAI: `^(gpt-|o\d)`. Anthropic: no filter (sorted descending so newest claude lands first). Gemini: must start with `gemini-` and support `generateContent`; paginated up to 5×50. `GoogleTranslateBroker.listModels` always returns `[]` (v2 has no `/models`).
+- **`listModels` filtering.** Each broker filters the catalog so picker UIs don't see embeddings / whisper / dall-e. OpenAI: `^(gpt-|o\d)`. `OpenAiCompatibleBroker`: the constructor's `modelFilter`, none by default. Anthropic: no filter (sorted descending so newest claude lands first). Gemini: must start with `gemini-` and support `generateContent`; paginated up to 5×50. `GoogleTranslateBroker.listModels` always returns `[]` (v2 has no `/models`).
 - **Streaming format.** OpenAI & Anthropic are SSE; Gemini is JSON-array by default and *must* be requested with `?alt=sse` so the shared `decodeSseStream` works. Anthropic uses named SSE events (`content_block_delta`, `message_stop`); OpenAI uses `data: [DONE]` to terminate; Gemini's SSE chunks share the same `candidates → content → parts → text` shape as the non-streaming response, so one extractor handles both.
 - **Retry policy.** Use `retryRequest` for every non-streaming call. It retries 429/500/502/503/504/529 and `ClientException` (network failures), honouring `Retry-After` (seconds or HTTP-date) up to `maxRetryAfter`. A `TimeoutException` is deliberately *not* retried — the provider may still be generating (and billing) the request. Pass `isHardFailure` when a status code can mean either "retry" or "give up" — currently only OpenAI 429 (`quota` in body) needs this. SSE calls bypass retry (mid-stream restart isn't sound).
+- **Streamed accounting.** `stream` is `streamWithMeta(...).deltas` on both streaming brokers — one parse path, so anything added to the read loop shows up in both. Anthropic takes usage from `message_start` (input + cache counts, serving model) and `message_delta` (stop reason, final output count); Gemini from `usageMetadata` + `finishReason` on the chunks. The read loops end in `yield*`, **not** `await for`: an `await for` leaves the generator parked on an await, where a consumer's `subscription.cancel()` hangs until the next byte arrives and the `finally` that settles the completion never runs. The cost of `yield*` is that stream errors bypass the enclosing `catch`, hence the `handleError` hop that fails the completion before re-throwing.
+- **Structured output (`ChatRequest.jsonSchema`).** All three chat brokers
+  honour it, in three different dialects, and the providers want *opposite*
+  things from the same schema. Anthropic takes JSON Schema verbatim in
+  `output_config.format`. Gemini takes an **OpenAPI 3.0 subset** in
+  `generationConfig.responseSchema` where `additionalProperties` is a hard 400
+  (`Unknown name "additionalProperties" at
+  'generation_config.response_schema'`) and nullability is a `nullable` flag,
+  not a `['string', 'null']` union. OpenAI's `strict` mode **requires**
+  `additionalProperties: false` on every object plus every property named in
+  `required`. `lib/src/chat/json_schema.dart` holds both translations as pure
+  functions — put dialect knowledge there, not in a broker. `toGeminiSchema`
+  returns null when a schema has no safe translation (recursive/unresolvable
+  `$ref`, a real multi-type union); the broker then sends
+  `responseMimeType: 'application/json'` alone, because unconstrained JSON
+  beats both prose and a 400. Every broker builds its payload in one
+  `@visibleForTesting buildPayload`, shared by the streaming and
+  non-streaming paths — keep it that way so the two cannot diverge.
+- **Tool calling (`ChatRequest.tools`).** One `AiTool` declaration, three
+  dialects, and they disagree about *results* even more than about
+  declarations. Anthropic: flat `tools: [{name, description, input_schema}]`,
+  `tool_choice: {type: 'auto'|'none'|'any'}` (`any` is our `required`),
+  response `content[]` blocks of `type: 'tool_use'`, and **every result for a
+  turn must ride in one user message** — splitting them is a 400, which is why
+  `_renderMessages` coalesces consecutive `AiMessage.toolResult`s. OpenAI:
+  `tools: [{type: 'function', function: {…}}]`, bare-string `tool_choice`,
+  `function.arguments` is a JSON **string** in both directions (parse it with
+  `decodeToolArguments`, re-encode it on the way out), and results are one
+  `role: 'tool'` message *per call* — the opposite of Anthropic. Gemini: a
+  single `tools: [{functionDeclarations: […]}]` entry, `parameters` through
+  `toGeminiSchema` (same OpenAPI-3 subset as `responseSchema`), no call id at
+  all (`GeminiBroker.syntheticToolCallId` mints one) and `functionResponse`
+  keyed by function *name*, recovered from the history or decoded back out of
+  the synthetic id. Gemini also never reports a tool finish reason — it says
+  `STOP` — so `finishReason` is normalised to `toolUse` from the calls
+  themselves *there only*; the other two say so on the wire and are believed,
+  so a call truncated by `max_tokens` still reads as truncated.
+- **Streamed tool arguments.** Anthropic and OpenAI both send them as JSON
+  fragments that parse only once concatenated, keyed by `index` because two
+  calls interleave. Both brokers accumulate into a `_PartialToolCall` map and
+  materialise in the `finally` — not at `content_block_stop` / the last
+  fragment — so a cancelled or truncated stream still reports the calls it
+  saw. Gemini sends each `functionCall` part whole. Text deltas must keep
+  flowing untouched through all of this; a caller that ignores tools should
+  not be able to tell.
+- **Retry policy.** Use `retryRequest` for every non-streaming call. Pass `isHardFailure` when a status code can mean either "retry" or "give up" — currently only OpenAI 429 (`quota` in body) needs this. SSE calls bypass retry (mid-stream restart isn't sound).
 - **Embed per-call limits.** OpenAI `text-embedding-3-*`: ≤2048 inputs, ≤300k tokens per request, ≤8191 tokens each. Gemini `text-embedding-004`: ≤100 per call. The broker just forwards the list — use the higher-level `Embedder` to batch.
 - **Google Translate glossary.** Cloud Translation v2 doesn't expose v3's server-side glossary resource, so `GoogleTranslateBroker` implements glossary client-side via `<span translate="no">…</span>` HTML wrapping with `format: 'html'`. Source text + glossary targets are HTML-escaped before sending; entities in the response are decoded back. Matching is exact, case-sensitive, substring — provide every casing you care about and use distinctive terms. On overlap the longer key wins; otherwise the earliest match wins. `domain` / `tone` / `context` hints are silently accepted but ignored by v2 — use `LlmTranslator` when they matter.
+- **OpenAI-compatible dialects.** The token ceiling field differs: OpenAI `max_completion_tokens` (its `max_tokens` is deprecated and rejected by o-series), DeepSeek and most others `max_tokens` — set by `maxTokensField`. DeepSeek's `response_format` takes only `json_object`, so `supportsJsonSchema: false` sends JSON mode and appends the schema to the system prompt. `ChatRequest.effort` becomes `reasoning_effort`; temperature is sent only when the caller set one. Streams send `stream_options.include_usage` (`streamUsage`) or the stream carries no token counts.
+- **Key checks.** `checkKey` is one metadata request, never a completion, and is not retried. 401/403 → invalid; Google APIs answer a bad key with 400 `API_KEY_INVALID` (`isGoogleInvalidKey`); 5xx, timeouts and `ClientException` → unreachable; anything else → error with the provider's message.
 - **Errors.** All broker-layer failures throw `AiBrokerException` (with optional `statusCode`). Don't leak provider-specific exception types out of the package.
 
 ## Internal import convention
@@ -132,6 +190,14 @@ The CLI auto-loads a `./.env` for keys, so a `.env` at the repo root with `OPENA
 
 ## Tests
 
+Two files break the mirror on purpose, because the thing under test is a
+cross-provider contract rather than a source file: `test/brokers/tool_calling_test.dart`
+(one group per provider, same five cases each — declaration, one call, several
+calls in a turn, results fed back, streaming) and
+`test/brokers/anthropic_modern_api_test.dart`. Put per-provider tool changes in
+the first of those, not in the individual broker test files, so the three wire
+shapes stay readable side by side.
+
 Tests live under `test/` mirroring `lib/src/` — subdirectories for each modality (`core/`, `chat/`, `embed/`, `translate/`, `brokers/`, `rag/`, `cli/`). One `*_test.dart` per source file; follow this naming so the layout stays scannable. Tests use fake brokers / injected `http.Client` / in-memory `CorpusStore.openInMemory()` — never hit a real provider or touch disk in unit tests. The CLI commands accept `brokerFactory` + `keyResolver` constructor parameters specifically as test seams.
 
 ## Editing notes
@@ -140,5 +206,5 @@ Tests live under `test/` mirroring `lib/src/` — subdirectories for each modali
 - `pubspec.yaml` `description` is the short form required by pub.dev / pana (≤180 chars). Don't expand it; expand `README.md` instead.
 - Local artifacts that must not ship to git: `.env`, `.env.*`, `*.db` / `*.db-*`. Already in `.gitignore`. The default workbench DB lives at `~/.ai_broker/corpus.db` (override with `$AIB_DB`); the in-repo `embeddings/corpus.db*` is a local dev scratch and ignored too.
 - Release flow: commit-prefix `+` triggers a CI version bump, `++` also publishes to pub.dev. Bump `CHANGELOG.md` in the same commit.
-- Adding a new provider: drop the broker file in `lib/src/brokers/`, implement only the capability interfaces (`ChatBroker` / `EmbedBroker` / `TranslateBroker`) the service actually supports — no `UnsupportedError` stubs. Wire it into `brokerForId()` in `lib/src/cli/runner.dart` so the CLI can resolve it.
+- Adding a new provider: if it speaks the OpenAI Chat Completions API, add a preset of `OpenAiCompatibleBroker` (see `DeepSeekBroker`) instead of a new wire implementation. Otherwise drop the broker file in `lib/src/brokers/`, implement only the capability interfaces (`ChatBroker` / `EmbedBroker` / `TranslateBroker`) the service actually supports — no `UnsupportedError` stubs. Wire it into `brokerForId()` in `lib/src/cli/runner.dart` so the CLI can resolve it.
 - Adding a new capability (image / TTS / vision / …): create a new sibling folder under `lib/src/` (e.g. `lib/src/image/`) with the interface in `image_broker.dart` plus any helpers. Update relevant brokers to implement it. Keep the modality split — don't extend `AiBroker` itself.

@@ -48,6 +48,7 @@ class TranslateCommand extends Command<int> {
           'openai',
           'anthropic',
           'gemini',
+          'deepseek',
         ],
         help: 'Translator backend. "google_translate" uses Google Cloud '
             'Translation v2; the chat brokers route through an LLM '

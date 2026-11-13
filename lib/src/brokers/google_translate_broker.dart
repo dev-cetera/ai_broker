@@ -46,7 +46,7 @@ import '/_common.dart';
 /// - **Overlap resolution.** When two glossary keys could match at
 ///   the same position, the longer one wins; otherwise the
 ///   earliest-starting match wins. Map iteration order doesn't matter.
-class GoogleTranslateBroker implements TranslateBroker {
+class GoogleTranslateBroker implements TranslateBroker, KeyCheckBroker {
   static const _baseUrl = 'https://translation.googleapis.com';
   static const _timeout = Duration(seconds: 30);
 
@@ -59,6 +59,20 @@ class GoogleTranslateBroker implements TranslateBroker {
 
   @override
   String get label => 'Google (Translate)';
+
+  /// Checks the key with the free `languages` call.
+  @override
+  Future<AiKeyCheck> checkKey(String apiKey) => checkKeyByRequest(
+        apiKey,
+        providerLabel: 'Google Translate',
+        send: () => _http
+            .get(
+              Uri.parse('$_baseUrl/language/translate/v2/languages')
+                  .replace(queryParameters: {'key': apiKey}),
+            )
+            .timeout(_timeout),
+        isInvalidKey: isGoogleInvalidKey,
+      );
 
   /// Cloud Translation v2 has no equivalent of `/models` — translation
   /// models aren't a user-facing pickable resource. Always returns the

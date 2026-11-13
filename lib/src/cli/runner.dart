@@ -60,12 +60,14 @@ AiBroker brokerForId(String id) {
       return GeminiBroker();
     case 'anthropic':
       return AnthropicBroker();
+    case 'deepseek':
+      return DeepSeekBroker();
     case 'google_translate':
       return GoogleTranslateBroker();
     default:
       throw UsageException(
         'Unknown broker "$id". Use one of: openai, gemini, anthropic, '
-            'google_translate.',
+            'deepseek, google_translate.',
         '',
       );
   }
@@ -73,7 +75,7 @@ AiBroker brokerForId(String id) {
 
 /// Default chat model id for an LLM-based translator wrapping the
 /// given chat broker. Used by [TranslateCommand] when the user picks
-/// `--broker openai|anthropic|gemini` without overriding `--model`.
+/// `--broker openai|anthropic|gemini|deepseek` without overriding `--model`.
 String defaultChatModelFor(String brokerId) {
   switch (brokerId) {
     case 'openai':
@@ -82,6 +84,8 @@ String defaultChatModelFor(String brokerId) {
       return 'claude-sonnet-4-6';
     case 'gemini':
       return 'gemini-2.5-flash';
+    case 'deepseek':
+      return 'deepseek-flash';
     default:
       throw ArgumentError('No default chat model for broker "$brokerId".');
   }
@@ -124,6 +128,10 @@ void addKeyArgs(ArgParser parser) {
       help: 'Gemini API key (highest priority).',
     )
     ..addOption(
+      'deepseek-key',
+      help: 'DeepSeek API key (highest priority).',
+    )
+    ..addOption(
       'env-file',
       help: 'Path to a .env file with KEY=value lines. If omitted, the CLI '
           'looks for ./.env in the current working directory.',
@@ -133,9 +141,11 @@ void addKeyArgs(ArgParser parser) {
 /// Builds a [KeyResolver] from CLI [args] using this precedence (first
 /// non-empty hit wins):
 ///
-///   1. `--openai-key` / `--anthropic-key` / `--gemini-key` (direct)
+///   1. `--openai-key` / `--anthropic-key` / `--gemini-key` /
+///      `--deepseek-key` (direct)
 ///   2. `--env-file <path>` if supplied; otherwise `./.env` if present
-///   3. Process env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY)
+///   3. Process env vars (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY,
+///      DEEPSEEK_API_KEY)
 ///
 /// Tests bypass this by passing a [KeyResolver] to the command
 /// constructor directly.
@@ -147,6 +157,7 @@ KeyResolver resolverFromArgs(ArgResults args) {
     'openai': 'openai-key',
     'anthropic': 'anthropic-key',
     'gemini': 'gemini-key',
+    'deepseek': 'deepseek-key',
   }.entries) {
     final v = args[entry.value] as String?;
     if (v != null && v.isNotEmpty) direct[entry.key] = v;

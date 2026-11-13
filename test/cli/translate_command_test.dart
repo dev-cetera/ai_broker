@@ -95,6 +95,17 @@ class _FakeChat extends ChatBroker {
     required ChatRequest request,
   }) =>
       const Stream<String>.empty();
+
+  @override
+  StreamedCompletion streamWithMeta({
+    required String apiKey,
+    required String model,
+    required ChatRequest request,
+  }) =>
+      StreamedCompletion.fromDeltas(
+        deltas: stream(apiKey: apiKey, model: model, request: request),
+        model: model,
+      );
 }
 
 void main() {

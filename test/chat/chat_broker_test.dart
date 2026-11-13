@@ -51,9 +51,83 @@ class _CapturingChat extends ChatBroker {
     required ChatRequest request,
   }) =>
       const Stream<String>.empty();
+
+  @override
+  StreamedCompletion streamWithMeta({
+    required String apiKey,
+    required String model,
+    required ChatRequest request,
+  }) =>
+      StreamedCompletion.fromDeltas(
+        deltas: stream(apiKey: apiKey, model: model, request: request),
+        model: model,
+      );
+}
+
+/// A broker that overrides nothing but the two abstract methods — exactly
+/// the case the default [ChatBroker.streamWithMeta] exists for.
+class _PlainChat extends ChatBroker {
+  /// Makes [stream] fail instead of yielding, to exercise the error path.
+  bool fail = false;
+
+  @override
+  String get id => 'plain';
+  @override
+  String get label => 'Plain';
+  @override
+  Future<List<String>> listModels(String apiKey) async => const [];
+
+  @override
+  Future<AiCompletion> chatWithMeta({
+    required String apiKey,
+    required String model,
+    required ChatRequest request,
+  }) async =>
+      const AiCompletion(text: 'hello world');
+
+  @override
+  Stream<String> stream({
+    required String apiKey,
+    required String model,
+    required ChatRequest request,
+  }) async* {
+    if (fail) throw const AiBrokerException('provider down');
+    yield 'hello ';
+    yield 'world';
+  }
 }
 
 void main() {
+  group('ChatBroker.streamWithMeta default impl', () {
+    const request = ChatRequest(system: '', messages: []);
+
+    test('yields the same deltas as stream() and settles a completion',
+        () async {
+      final b = _PlainChat();
+      final turn = b.streamWithMeta(apiKey: 'k', model: 'm', request: request);
+      expect(await turn.deltas.toList(), ['hello ', 'world']);
+      final done = await turn.completion;
+      expect(done.text, 'hello world');
+      expect(done.model, 'm');
+      // Best effort: a bare delta stream carries no accounting at all.
+      expect(done.finishReason, AiFinishReason.stop);
+      expect(done.inputTokens, isNull);
+      expect(done.outputTokens, isNull);
+      expect(done.cacheReadInputTokens, 0);
+      expect(done.cacheCreationInputTokens, 0);
+    });
+
+    test('a failing stream fails the completion too', () async {
+      final b = _PlainChat()..fail = true;
+      final turn = b.streamWithMeta(apiKey: 'k', model: 'm', request: request);
+      await expectLater(
+        turn.deltas.toList(),
+        throwsA(isA<AiBrokerException>()),
+      );
+      await expectLater(turn.completion, throwsA(isA<AiBrokerException>()));
+    });
+  });
+
   group('ChatBroker.complete default impl', () {
     test('delegates to chatWithMeta() with a single-user-message ChatRequest',
         () async {

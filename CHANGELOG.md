@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.8.0]
+
+- breaking: `ChatRequest.temperature` is now `double?` (default `null`, was `0.3`) and is sent only when set; current Claude and OpenAI reasoning models reject it. `complete` / `completeWithMeta` take `double? temperature`.
+- breaking: a turn with no text no longer throws from `chatWithMeta` / `completeWithMeta`; a refusal or a truncated empty reply is reported (`finishReason`), and only `chat` / `complete` throw.
+- breaking: `OpenAiBroker` sends the token ceiling as `max_completion_tokens` (`max_tokens` is deprecated and rejected by o-series models).
+- feat: `AiCompletion` gains `model`, `cacheReadInputTokens`, `cacheCreationInputTokens` and `toolCalls`, plus `isRefusal`, `wantsTool` and `isTruncated`. Its constructor now needs only `text`.
+- feat: `OpenAiCompatibleBroker(id:, label:, baseUrl:, …)` for any OpenAI-compatible API (OpenRouter, Mistral, Groq, xAI, Ollama, LM Studio, vLLM); `OpenAiBroker` now builds on it.
+- feat: `DeepSeekBroker`, chat only; `jsonSchema` is sent as JSON mode with the schema in the system prompt, since DeepSeek has no `json_schema`. `deepseek` is recognised by the key resolvers and the CLI (`--deepseek-key`, `DEEPSEEK_API_KEY`).
+- feat: `KeyCheckBroker.checkKey(apiKey)` returns an `AiKeyCheck` that tells `valid`, `invalid`, `unreachable` and `error` apart; implemented by every built-in broker. `checkKeyByRequest` and `isGoogleInvalidKey` are exported for custom brokers.
+- feat: `AnthropicBroker(browserAccess: true)` sends `anthropic-dangerous-direct-browser-access`, so a web app can call Claude with the user's own key.
+- feat: `ChatRequest.effort` (`AiEffort`) maps to Anthropic `output_config.effort` and to `reasoning_effort` on OpenAI-compatible APIs.
+- feat: `ChatRequest.jsonSchema` structured output on all three providers (Anthropic `output_config.format`, OpenAI strict `json_schema`, Gemini `responseSchema`); `toGeminiSchema` and `toOpenAiStrictSchema` are exported.
+- feat: tool calling on all three providers: `AiTool`, `ChatRequest.tools` / `toolChoice`, `AiCompletion.toolCalls`, `AiMessage.assistantToolCalls` / `AiMessage.toolResult`, `decodeToolArguments`.
+- feat: `ChatRequest.cacheSystem` marks the Anthropic system prompt for prompt caching.
+- feat: `streamWithMeta` returns a `StreamedCompletion` whose `completion` carries token counts, the serving model and the finish reason; streams on OpenAI-compatible APIs ask for usage.
+- feat: `AnthropicBroker(baseUrl:)` and `ANTHROPIC_BASE_URL` for proxies and gateways.
+- fix: constructing `AnthropicBroker` and honouring a `Retry-After` date no longer touch `dart:io`, so both work on the web.
+- fix: chat request timeouts raised from 30 s to 120 s for every chat broker; long structured or reasoning replies were cut off.
 
 ## [0.5.2]
 
