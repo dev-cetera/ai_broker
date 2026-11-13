@@ -15,10 +15,10 @@ name: ai_broker
 homepage: https://dev-cetera.com/
 repository: https://github.com/dev-cetera/ai_broker
 description: >-
-  Provider-agnostic Dart broker for Claude, OpenAI, Gemini, and Google
-  Translate. Chat, embed, translate, plus a RAG CLI over a local
-  SQLite vector store.
-version: 0.5.2
+  Provider-agnostic Dart broker for Claude, OpenAI, DeepSeek, Gemini and
+  any OpenAI-compatible API. Chat, tools, structured output, embed,
+  translate, plus a RAG CLI.
+version: 0.8.0
 topics:
   - ai
   - llm

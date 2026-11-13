@@ -330,4 +330,20 @@ void main() {
       expect(e.toString(), 'plain');
     });
   });
+
+  group('parseHttpDate', () {
+    test('reads an IMF-fixdate as UTC', () {
+      expect(
+        parseHttpDate('Sun, 06 Nov 1994 08:49:37 GMT'),
+        DateTime.utc(1994, 11, 6, 8, 49, 37),
+      );
+    });
+
+    test('rejects other forms and impossible dates', () {
+      expect(parseHttpDate('Sunday, 06-Nov-94 08:49:37 GMT'), isNull);
+      expect(parseHttpDate('Sun Nov  6 08:49:37 1994'), isNull);
+      expect(parseHttpDate('Sun, 31 Feb 1994 08:49:37 GMT'), isNull);
+      expect(parseHttpDate('soon'), isNull);
+    });
+  });
 }

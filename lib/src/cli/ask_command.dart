@@ -57,7 +57,7 @@ class AskCommand extends Command<int> {
       ..addOption(
         'broker',
         defaultsTo: 'anthropic',
-        allowed: ['anthropic', 'openai', 'gemini'],
+        allowed: ['anthropic', 'openai', 'gemini', 'deepseek'],
         help: 'Chat broker (independent of the collection\'s embed broker).',
       )
       ..addOption(
@@ -67,8 +67,8 @@ class AskCommand extends Command<int> {
       )
       ..addOption(
         'temperature',
-        defaultsTo: '0.3',
-        help: 'Chat sampling temperature.',
+        help: 'Chat sampling temperature. Omitted unless set: current Claude '
+            'and OpenAI reasoning models reject it.',
       )
       ..addOption(
         'max-tokens',
@@ -112,7 +112,9 @@ class AskCommand extends Command<int> {
     final topK = int.parse(args['top-k'] as String);
     final chatBrokerId = args['broker'] as String;
     final chatModel = args['model'] as String;
-    final temperature = double.parse(args['temperature'] as String);
+    final rawTemperature = args['temperature'] as String?;
+    final temperature =
+        rawTemperature == null ? null : double.parse(rawTemperature);
     final maxTokens = int.parse(args['max-tokens'] as String);
     final shouldStream = args['stream'] as bool;
     final showCitations = args['citations'] as bool;

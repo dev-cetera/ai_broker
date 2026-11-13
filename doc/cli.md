@@ -61,12 +61,13 @@ sqlite3 library at runtime.
 Every command that needs to call a model accepts keys from any of these
 sources, tried in order; the **first non-empty hit wins**:
 
-1. Direct flags: `--openai-key`, `--anthropic-key`, `--gemini-key`.
+1. Direct flags: `--openai-key`, `--anthropic-key`, `--gemini-key`,
+   `--deepseek-key`.
 2. `--env-file <path>` — a `.env`-style file (`KEY=VALUE` lines).
 3. `./.env` in the current working directory (auto-detected if `--env-file`
    isn't supplied). Same format as #2.
 4. Process environment variables: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-   `GEMINI_API_KEY`.
+   `GEMINI_API_KEY`, `DEEPSEEK_API_KEY`.
 
 **Recommended for local use:** drop a `.env` in your project root. It's
 already in this repo's `.gitignore`.
@@ -75,6 +76,7 @@ already in this repo's `.gitignore`.
 OPENAI_API_KEY=sk-proj-...
 ANTHROPIC_API_KEY=sk-ant-...
 # GEMINI_API_KEY=AIza...   # optional
+# DEEPSEEK_API_KEY=sk-...  # optional
 ```
 
 The file is also tolerant of looser formats (recognised aliases include
@@ -167,9 +169,9 @@ ai_broker ask --collection my_docs \
 | `-c`, `--collection` | `default` | Collection to retrieve from. |
 | `--db` | `~/.ai_broker/corpus.db` | SQLite path. |
 | `-k`, `--top-k` | `8` | Number of snippets to feed as context. |
-| `--broker` | `anthropic` | Chat broker — `anthropic`, `openai`, `gemini`. Independent of the collection's embed broker. |
+| `--broker` | `anthropic` | Chat broker — `anthropic`, `openai`, `gemini`, `deepseek`. Independent of the collection's embed broker. |
 | `--model` | `claude-sonnet-4-6` | Chat model id. |
-| `--temperature` | `0.3` | Sampling temperature. |
+| `--temperature` | not sent | Sampling temperature. Leave unset for current Claude and OpenAI reasoning models, which reject it. |
 | `--max-tokens` | `2048` | Cap on answer length. |
 | `--[no-]stream` | streams | Token-by-token output, or batched. |
 | `--[no-]citations` | shows | Print/suppress the `— Sources` footer. |
@@ -188,7 +190,7 @@ to specify the chat broker.
 ### `ai_broker translate <text>`
 
 Translate a string. Default backend is Google Cloud Translation v2
-(`--broker google_translate`); pass `--broker openai|anthropic|gemini`
+(`--broker google_translate`); pass `--broker openai|anthropic|gemini|deepseek`
 to route through an LLM-based translator instead (richer context
 handling, higher cost per character).
 
@@ -209,7 +211,7 @@ ai_broker translate --to fr --glossary "BME280=BME280,catalyst=catalyseur" \
 |------|---------|---------|
 | `--to` | _(required)_ | Target language code (`fr`, `es`, `de`, `ja`, …). |
 | `--from` | (auto-detect) | Source language code. Omit to let the provider detect. |
-| `--broker` | `google_translate` | `google_translate`, `openai`, `anthropic`, or `gemini`. |
+| `--broker` | `google_translate` | `google_translate`, `openai`, `anthropic`, `gemini`, or `deepseek`. |
 | `--model` | per-broker default | Model id for LLM brokers (ignored by Google Translate). |
 | `--domain` | — | Domain hint like `"medical"`, `"legal"`. LLM brokers only. |
 | `--tone` | — | `"formal"` / `"casual"` etc. LLM brokers only. |
@@ -366,5 +368,6 @@ latency stays in the 50-100ms range.
 | `OPENAI_API_KEY` | `ingest`, `search`, `ask`, `translate --broker openai` | OpenAI auth (chat or embed). |
 | `ANTHROPIC_API_KEY` | `ask`, `translate --broker anthropic` | Anthropic auth. |
 | `GEMINI_API_KEY` | `ingest --embed-broker gemini`, `ask --broker gemini`, `translate --broker gemini` | Gemini auth. |
+| `DEEPSEEK_API_KEY` | `ask --broker deepseek`, `translate --broker deepseek` | DeepSeek auth. |
 | `GOOGLE_TRANSLATE_API_KEY` | `translate` (default backend) | Google Cloud Translation v2 auth. |
 | `AIB_DB` | every command that touches the DB | Default SQLite path when `--db` is omitted. |

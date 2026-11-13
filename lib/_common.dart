@@ -15,12 +15,14 @@
 // `import '/_common.dart';`. Bundle third-party APIs the package uses
 // here so individual sources don't repeat the same imports.
 
-export 'dart:async' show StreamController, StreamSubscription, TimeoutException;
+export 'dart:async'
+    show Completer, StreamController, StreamSubscription, TimeoutException;
 export 'dart:convert' show jsonDecode, jsonEncode, utf8, LineSplitter;
-export 'dart:io' show HttpDate, HttpException, Platform;
+// `Platform` is only read on native paths (EnvKeyResolver, the CLI).
+export 'dart:io' show Platform;
 
 export 'package:http/http.dart'
     show Client, ClientException, Request, Response, StreamedResponse;
-export 'package:meta/meta.dart' show immutable, visibleForTesting;
+export 'package:meta/meta.dart' show immutable, protected, visibleForTesting;
 
 export 'src/_src.dart';

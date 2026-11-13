@@ -1,5 +1,5 @@
 [![pub](https://img.shields.io/pub/v/ai_broker.svg)](https://pub.dev/packages/ai_broker)
-[![tag](https://img.shields.io/badge/Tag-v0.5.0-purple?logo=github)](https://github.com/dev-cetera/ai_broker/tree/v0.5.0)
+[![tag](https://img.shields.io/badge/Tag-v0.8.0-purple?logo=github)](https://github.com/dev-cetera/ai_broker/tree/v0.8.0)
 [![instagram](https://img.shields.io/badge/Instagram-E4405F?logo=instagram&logoColor=white)](https://www.instagram.com/dev_cetera/)
 [![license](https://img.shields.io/badge/License-MIT-blue.svg)](https://raw.githubusercontent.com/dev-cetera/ai_broker/main/LICENSE)
 
@@ -7,14 +7,15 @@
 
 <!-- BEGIN _README_CONTENT -->
 
-Provider-agnostic Dart abstraction over Claude, OpenAI, and Gemini, **plus a
-RAG layer and a ready-to-use CLI** for ingesting documents, searching them,
+Provider-agnostic Dart abstraction over Claude, OpenAI, DeepSeek, Gemini and
+any OpenAI-compatible API, **plus a RAG layer and a ready-to-use CLI** for ingesting documents, searching them,
 and asking questions grounded in the results.
 
 One library, two ways to use it:
 
 1. **As a library** — wire `OpenAiBroker` / `AnthropicBroker` / `GeminiBroker`
-   into your app and call `complete`, `chat`, `stream`, or `embed` through a
+   / `DeepSeekBroker` / `OpenAiCompatibleBroker` into your app (Dart or
+   Flutter, including the web) and call `complete`, `chat`, `stream`, or `embed` through a
    single interface. Optionally use the RAG primitives (`SentenceWindowChunker`,
    `Embedder`, `CorpusStore`) to build your own retrieval-augmented features.
 2. **As a CLI** — `dart pub global activate ai_broker` and use `ai_broker`
@@ -52,6 +53,8 @@ abstract class ChatBroker implements AiBroker {
   Future<AiCompletion> completeWithMeta({ ... });                      // + finish reason, token counts
   Future<AiCompletion> chatWithMeta({ ... ChatRequest request });      // the one call every chat broker implements
   Stream<String> stream({ ... ChatRequest request });                  // token-by-token
+  Future<AiCompletion> chatWithMeta({ ... ChatRequest request });      // + usage / stop reason
+  StreamedCompletion streamWithMeta({ ... ChatRequest request });      // streamed, + usage
 }
 
 abstract class EmbedBroker implements AiBroker {
@@ -61,9 +64,12 @@ abstract class EmbedBroker implements AiBroker {
 
 | Provider | Implements |
 |----------|-----------|
-| `OpenAiBroker` | `ChatBroker` + `EmbedBroker` |
-| `AnthropicBroker` | `ChatBroker` (no embed — Anthropic has no first-party embeddings) |
-| `GeminiBroker` | `ChatBroker` + `EmbedBroker` |
+| `OpenAiBroker` | `ChatBroker` + `EmbedBroker` + `KeyCheckBroker` |
+| `AnthropicBroker` | `ChatBroker` + `KeyCheckBroker` (no embed — Anthropic has no first-party embeddings) |
+| `GeminiBroker` | `ChatBroker` + `EmbedBroker` + `KeyCheckBroker` |
+| `DeepSeekBroker` | `ChatBroker` + `KeyCheckBroker` |
+| `OpenAiCompatibleBroker` | `ChatBroker` + `KeyCheckBroker` — any OpenAI-style API |
+| `GoogleTranslateBroker` | `TranslateBroker` + `KeyCheckBroker` |
 
 `completeWithMeta` / `chatWithMeta` return an `AiCompletion`: the text,
 the provider's raw finish reason (`'STOP'`, `'end_turn'`, `'length'`, …),
@@ -131,8 +137,206 @@ void main() async {
   await for (final chunk in stream) {
     stdout.write(chunk);
   }
+
+  // Streaming, with the accounting the stream already carries. Same text,
+  // same timing — plus what the turn cost and why it ended.
+  final turn = broker.streamWithMeta(
+    apiKey: apiKey,
+    model: 'claude-sonnet-4-6',
+    request: const ChatRequest(
+      system: 'You write short prose.',
+      messages: [AiMessage.user('Describe an ocean sunset.')],
+    ),
+  );
+  await for (final delta in turn.deltas) {
+    stdout.write(delta);
+  }
+  final done = await turn.completion;         // resolves when the stream ends
+  if (done.isRefusal) stderr.writeln('the model declined');
+  print('\n${done.inputTokens} in / ${done.outputTokens} out on ${done.model}');
 }
 ```
+
+## Structured output (0.8.0+)
+
+Set `ChatRequest.jsonSchema` and the reply comes back as valid JSON by
+construction — no code fences to strip, no brace-hunting, no
+retry-on-parse loop. **Every chat broker honours it**, each in its own
+dialect:
+
+| Provider | Wire field |
+|----------|-----------|
+| `AnthropicBroker` | `output_config.format` — the schema verbatim |
+| `OpenAiBroker` | `response_format` — `strict: true`, via `toOpenAiStrictSchema` |
+| `GeminiBroker` | `generationConfig.responseMimeType` + `responseSchema`, via `toGeminiSchema` |
+| `DeepSeekBroker` | `response_format: {type: 'json_object'}` plus the schema in the system prompt — DeepSeek has JSON mode only, so the shape is asked for, not enforced |
+
+```dart
+const schema = {
+  'type': 'object',
+  'additionalProperties': false,
+  'required': ['verdict', 'reason'],
+  'properties': {
+    'verdict': {'type': 'string', 'enum': ['PASS', 'FAIL']},
+    'reason': {'type': ['string', 'null']},
+  },
+};
+
+final raw = await broker.chat(
+  apiKey: apiKey,
+  model: model,
+  request: const ChatRequest(
+    system: 'You score answers.',
+    messages: [AiMessage.user('Is 2 + 2 = 5?')],
+    jsonSchema: schema,
+  ),
+);
+final scored = jsonDecode(raw) as Map<String, Object?>;   // safe on all three
+```
+
+Write it once as ordinary JSON Schema; the package reconciles the
+providers, which disagree in *opposite* directions — Gemini 400s on
+`additionalProperties`, OpenAI's strict mode requires it (and requires
+every property to appear in `required`). The translations are pure
+functions you can call yourself to see exactly what will be sent:
+
+```dart
+toGeminiSchema(schema);       // OpenAPI 3.0 subset, or null if inexpressible
+toOpenAiStrictSchema(schema); // strict-mode JSON Schema
+```
+
+Portable subset: objects with `properties` / `required` /
+`additionalProperties: false`, arrays with `items`, `enum` for closed string
+sets, and `type: ['string', 'null']` for nullable fields. Value bounds
+(`minLength`, `maximum`, `pattern`, …) are dropped on the way to Gemini —
+state those in the prompt. A schema Gemini cannot express at all (a recursive
+`$ref`, a `['string', 'number']` union) still yields JSON, just unconstrained.
+
+## Tool calling (0.8.0+)
+
+Declare tools once with `AiTool`; **every chat broker honours them**, in three
+incompatible dialects:
+
+| Provider | Declaration | Result goes back as |
+|----------|-------------|---------------------|
+| `AnthropicBroker` | `tools: [{name, description, input_schema}]` | `tool_result` blocks — **all of a turn's in one user message** |
+| `OpenAiBroker` | `tools: [{type: 'function', function: {…}}]` | one `role: 'tool'` message per `tool_call_id` |
+| `GeminiBroker` | one `tools: [{functionDeclarations: […]}]` entry, via `toGeminiSchema` | `functionResponse` parts, keyed by function *name* |
+
+The package never runs a tool. It reports what the model asked for; you
+execute it and hand the answer back on the next turn:
+
+```dart
+const tools = [
+  AiTool(
+    name: 'get_weather',
+    description: 'Look up the current weather for a city.',
+    inputSchema: {
+      'type': 'object',
+      'properties': {'city': {'type': 'string'}},
+      'required': ['city'],
+    },
+  ),
+];
+
+final messages = <AiMessage>[AiMessage.user('Weather in Canberra?')];
+
+// Tool calls live on the *detailed* results — `chat` and `stream` are
+// text-only, and a turn that is nothing but a call has no text to return.
+var turn = await broker.chatWithMeta(
+  apiKey: apiKey,
+  model: model,
+  request: ChatRequest(system: '', messages: messages, tools: tools),
+);
+
+while (turn.wantsTool) {
+  // Replay the assistant turn — every provider rejects a result whose call
+  // is not in the transcript above it.
+  messages
+    ..add(AiMessage.assistantToolCalls(turn.toolCalls, content: turn.text))
+    ..addAll([
+      for (final call in turn.toolCalls)
+        AiMessage.toolResult(
+          toolCallId: call.id,
+          content: await runTool(call.name, call.arguments), // yours
+        ),
+    ]);
+  turn = await broker.chatWithMeta(
+    apiKey: apiKey,
+    model: model,
+    request: ChatRequest(system: '', messages: messages, tools: tools),
+  );
+}
+
+print(turn.text);
+```
+
+`AiToolCall.arguments` is always a decoded `Map` — OpenAI sends it as a JSON
+*string* and `decodeToolArguments` parses it, so nothing downstream is tempted
+to match on the raw text. `ChatRequest.toolChoice` (`auto` / `none` /
+`required`) forces the issue when you need it; `required` is sent as
+Anthropic's `any` and Gemini's `ANY`.
+
+Streaming works the same way: `streamWithMeta(...).deltas` keeps yielding text
+exactly as before, and the completed calls land on `.completion` once the
+arguments — which arrive as unparseable JSON fragments on Anthropic and OpenAI
+— have been reassembled.
+
+## OpenAI-compatible providers and DeepSeek (0.8.0+)
+
+`OpenAiCompatibleBroker` talks to anything that serves the OpenAI Chat
+Completions API: OpenRouter, Mistral, Groq, xAI, Together, or a local Ollama,
+LM Studio or vLLM server.
+
+```dart
+final groq = OpenAiCompatibleBroker(
+  id: 'groq',
+  label: 'Groq',
+  baseUrl: 'https://api.groq.com/openai/v1',
+);
+final ollama = OpenAiCompatibleBroker(
+  id: 'ollama',
+  label: 'Ollama',
+  baseUrl: 'http://localhost:11434/v1',
+);
+```
+
+The knobs are the ways these APIs differ: `maxTokensField`
+(`max_tokens` by default; OpenAI uses `max_completion_tokens`),
+`supportsJsonSchema`, `streamUsage`, `modelFilter` for `listModels`, and
+`extraHeaders` (OpenRouter's `HTTP-Referer`, say). `OpenAiBroker` and
+`DeepSeekBroker` are presets of it.
+
+`ChatRequest.effort` becomes `reasoning_effort` on these APIs (and
+`output_config.effort` on Anthropic). `temperature` is sent only when you set
+it: current Claude models and OpenAI reasoning models reject it.
+
+## Bring-your-own-key apps (0.8.0+)
+
+For an app where each user pastes their own key:
+
+```dart
+final broker = AiBrokerRegistry.instance.lookupAs<KeyCheckBroker>('deepseek')!;
+final check = await broker.checkKey(pastedKey);
+switch (check.status) {
+  case AiKeyStatus.valid:       // save it
+  case AiKeyStatus.invalid:     // "That key was rejected"
+  case AiKeyStatus.unreachable: // "Couldn't reach DeepSeek, try again"
+  case AiKeyStatus.error:       // show check.message (e.g. no credit left)
+}
+```
+
+`checkKey` is one metadata request (usually the model list), never a
+completion, so it costs nothing. `listModels` can't make this distinction: it
+returns `[]` for a bad key, a dead network and an empty catalogue alike.
+
+**On the web**, a browser only lets the request through if the provider allows
+CORS. Anthropic requires an explicit opt-in:
+`AnthropicBroker(browserAccess: true)` sends
+`anthropic-dangerous-direct-browser-access: true`. Use it only with the
+user's own key — anything in the browser can be read from its developer
+tools. Whether other providers accept browser requests is up to them; check
+before you rely on it, or route through your own proxy (`baseUrl`).
 
 ## Library quick start — RAG
 
@@ -202,7 +406,7 @@ ai_broker search --collection handbook "key rotation"
 # 3. Ask a question — retrieval + grounded answer (Anthropic by default).
 ai_broker ask --collection handbook "How do I rotate the API key?"
 
-# 4. Translate — Google Cloud Translation by default; --broker openai|anthropic|gemini
+# 4. Translate — Google Cloud Translation by default; --broker openai|anthropic|gemini|deepseek
 #    routes through an LLM with domain / tone / glossary hints.
 ai_broker translate --to fr "the catalyst is unstable"
 ai_broker translate --to fr --broker anthropic --domain chemistry --tone formal \
@@ -218,7 +422,7 @@ helper that chains them for the CLI:
 
 | Resolver | Use when |
 | --- | --- |
-| `EnvKeyResolver` | Reads `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` (overridable). |
+| `EnvKeyResolver` | Reads `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` (overridable). Native only. |
 | `MapKeyResolver` | Tests, or apps that already hold keys in a map. |
 | `FileKeyResolver.fromFile(path)` | Parses `.env`-style files (`KEY=value`) or loose `claude: …` / `openai key: …` lines. |
 | `ChainedKeyResolver([…])` | Tries each layer in order, returns the first non-empty hit. |
@@ -232,15 +436,17 @@ by default. Library users in Flutter apps with secure storage can skip
 
 - **No safety gate.** Prompt sanitisation, output filtering, content
   moderation — call-site concern.
-- **No tools / function calling** yet.
+- **No tool execution.** Tool *calling* is supported (0.8.0+) — declaring
+  tools, reading back what the model asked for, feeding results in — but
+  running the tool is yours. No sandbox, no dispatch table, no retry loop.
 - **No reranking** in the RAG layer — cosine top-K only. Add a cross-encoder
   or Cohere Rerank at the call site if quality demands it.
 - **No Flutter widgets.** Pure Dart. Build pickers / chat UIs / settings
   dialogs on top in the consuming app.
 - **No web support for the RAG layer.** `CorpusStore` depends on native
-  `package:sqlite3`. The chat / embed APIs (`AiBroker`, `Embedder`,
-  `SentenceWindowChunker`) are pure Dart and work on web; the storage layer
-  is native-only today.
+  `package:sqlite3`. The chat / embed / translate / key-check APIs are pure
+  Dart and work on the web (dart2js and dart2wasm); the storage layer is
+  native-only today.
 
 ## Run the example
 

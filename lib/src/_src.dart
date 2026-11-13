@@ -10,12 +10,16 @@
 // ignore_for_file: directives_ordering
 
 export './brokers/anthropic_broker.dart';
+export './brokers/deepseek_broker.dart';
 export './brokers/gemini_broker.dart';
 export './brokers/google_translate_broker.dart';
 export './brokers/openai_broker.dart';
+export './brokers/openai_compatible_broker.dart';
 export './chat/chat_broker.dart';
 export './chat/completion.dart';
+export './chat/json_schema.dart';
 export './chat/message.dart';
+export './chat/tool.dart';
 export './cli/ask_command.dart';
 export './cli/collections_command.dart';
 export './cli/ingest_command.dart';
@@ -24,6 +28,7 @@ export './cli/search_command.dart';
 export './cli/translate_command.dart';
 export './core/broker.dart';
 export './core/code_fence.dart';
+export './core/key_check.dart';
 export './core/key_resolver.dart';
 export './core/retry.dart';
 export './core/sse.dart';

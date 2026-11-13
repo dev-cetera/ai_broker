@@ -124,6 +124,17 @@ gemini: g-3
       expect(await r.resolve('gemini'), 'g-3');
     });
 
+    test('recognises deepseek in both styles', () async {
+      final r = FileKeyResolver.fromFile(
+        writeKeys('DEEPSEEK_API_KEY=sk-ds-1\n').path,
+      );
+      expect(await r.resolve('deepseek'), 'sk-ds-1');
+      final loose = FileKeyResolver.fromFile(
+        writeKeys('deepseek: sk-ds-2\n').path,
+      );
+      expect(await loose.resolve('deepseek'), 'sk-ds-2');
+    });
+
     test('skips comments, blank lines, and empty values', () async {
       final f = writeKeys('''
 # this is a comment
