@@ -346,4 +346,141 @@ void main() {
       expect(parseHttpDate('soon'), isNull);
     });
   });
+
+  // `abortTrigger` stops the loop for good: an abort is never retried, and a
+  // trigger that fires during a backoff ends the wait instead of sitting it
+  // out.
+  group('retryRequest with abortTrigger', () {
+    test('a trigger that already completed throws before send runs', () async {
+      var calls = 0;
+      await expectLater(
+        retryRequest(
+          send: () async {
+            calls++;
+            return _ok();
+          },
+          providerLabel: 'Test',
+          abortTrigger: Future<void>.value(),
+        ),
+        throwsA(isA<AiAbortedException>()),
+      );
+      expect(calls, 0);
+    });
+
+    test('a Completer completed just before the call counts as already fired',
+        () async {
+      var calls = 0;
+      final trigger = Completer<void>()..complete();
+      await expectLater(
+        retryRequest(
+          send: () async {
+            calls++;
+            return _ok();
+          },
+          providerLabel: 'Test',
+          abortTrigger: trigger.future,
+        ),
+        throwsA(isA<AiAbortedException>()),
+      );
+      expect(calls, 0);
+    });
+
+    test('aborts an attempt that is still in flight', () async {
+      final trigger = Completer<void>();
+      final sent = Completer<void>();
+      final call = retryRequest(
+        send: () {
+          sent.complete();
+          return Completer<Response>().future; // never answers
+        },
+        providerLabel: 'Test',
+        abortTrigger: trigger.future,
+      );
+      await sent.future;
+      trigger.complete();
+      await expectLater(call, throwsA(isA<AiAbortedException>()));
+    });
+
+    test('never retries a RequestAbortedException', () async {
+      var calls = 0;
+      await expectLater(
+        retryRequest(
+          send: () async {
+            calls++;
+            throw RequestAbortedException();
+          },
+          providerLabel: 'Test',
+          baseDelay: Duration.zero,
+          abortTrigger: Completer<void>().future,
+        ),
+        throwsA(isA<AiAbortedException>()),
+      );
+      expect(calls, 1);
+    });
+
+    test('stops a caller-supplied wait when the trigger fires', () async {
+      var calls = 0;
+      final trigger = Completer<void>();
+      final waiting = Completer<void>();
+      await expectLater(
+        retryRequest(
+          send: () async {
+            calls++;
+            return Response('busy', 503);
+          },
+          providerLabel: 'Test',
+          wait: (_) {
+            waiting.complete();
+            trigger.complete();
+            return Completer<void>().future; // a backoff that never ends
+          },
+          abortTrigger: trigger.future,
+        ),
+        throwsA(isA<AiAbortedException>()),
+      );
+      expect(waiting.isCompleted, isTrue);
+      expect(calls, 1);
+    });
+
+    test('stops the default backoff when the trigger fires', () async {
+      var calls = 0;
+      final trigger = Completer<void>();
+      final stopwatch = Stopwatch()..start();
+      final call = retryRequest(
+        send: () async {
+          calls++;
+          throw ClientException('Connection reset');
+        },
+        providerLabel: 'Test',
+        // Long enough that only the abort can end this test in time.
+        baseDelay: const Duration(hours: 1),
+        abortTrigger: trigger.future,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      trigger.complete();
+      await expectLater(call, throwsA(isA<AiAbortedException>()));
+      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 5)));
+      expect(calls, 1);
+    });
+
+    test('a trigger that never fires changes nothing', () async {
+      final statuses = [429, 200];
+      var i = 0;
+      final res = await retryRequest(
+        send: () async => Response('body', statuses[i++]),
+        providerLabel: 'Test',
+        baseDelay: Duration.zero,
+        abortTrigger: Completer<void>().future,
+      );
+      expect(res.statusCode, 200);
+      expect(i, 2);
+    });
+
+    test('AiAbortedException is an AiBrokerException', () {
+      const e = AiAbortedException();
+      expect(e, isA<AiBrokerException>());
+      expect(e.statusCode, isNull);
+      expect(e.toString(), 'The request was aborted.');
+    });
+  });
 }

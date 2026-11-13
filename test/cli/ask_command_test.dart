@@ -55,6 +55,7 @@ class _AskFake extends ChatBroker implements EmbedBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) async {
     chatCalled = true;
     lastChatRequest = request;
@@ -70,6 +71,7 @@ class _AskFake extends ChatBroker implements EmbedBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) async* {
     streamCalled = true;
     lastChatRequest = request;
@@ -83,6 +85,7 @@ class _AskFake extends ChatBroker implements EmbedBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) =>
       StreamedCompletion.fromDeltas(
         deltas: stream(apiKey: apiKey, model: model, request: request),

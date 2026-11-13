@@ -98,3 +98,14 @@ class AiBrokerException implements Exception {
   String toString() =>
       statusCode == null ? message : 'HTTP $statusCode: $message';
 }
+
+/// Thrown when a request is cancelled through its `abortTrigger`: by the
+/// request methods on `ChatBroker`, on the stream of `ChatBroker.stream` and
+/// `StreamedCompletion.deltas`, and by `StreamedCompletion.completion`.
+///
+/// An [AiBrokerException], so code that already catches those keeps working;
+/// catch this one first to tell "the user stopped it" apart from a failure.
+/// It is never retried.
+class AiAbortedException extends AiBrokerException {
+  const AiAbortedException([super.message = 'The request was aborted.']);
+}

@@ -338,6 +338,37 @@ user's own key — anything in the browser can be read from its developer
 tools. Whether other providers accept browser requests is up to them; check
 before you rely on it, or route through your own proxy (`baseUrl`).
 
+## Cancelling a request (0.9.0+)
+
+Every request method on `ChatBroker` takes an optional `abortTrigger`. Complete
+it and the HTTP request is aborted — the connection is closed, so the provider
+stops generating (and billing) — and the call throws `AiAbortedException`:
+
+```dart
+final stop = Completer<void>();
+stopButton.onPressed = stop.complete;
+
+try {
+  final answer = await broker.chat(
+    apiKey: apiKey,
+    model: 'claude-sonnet-4-6',
+    request: request,
+    abortTrigger: stop.future,
+  );
+  show(answer);
+} on AiAbortedException {
+  // The user stopped it; nothing to report.
+} on AiBrokerException catch (e) {
+  showError(e.message);
+}
+```
+
+A stream (`stream`, or `streamWithMeta().deltas`) ends with
+`AiAbortedException` as its error, and `streamWithMeta().completion` fails with
+it too. A trigger that has already completed throws before anything is sent,
+and an aborted request is never retried — a pending backoff ends at once.
+`AiAbortedException` is an `AiBrokerException`, so catch it first.
+
 ## Library quick start — RAG
 
 ```dart
@@ -422,7 +453,7 @@ helper that chains them for the CLI:
 
 | Resolver | Use when |
 | --- | --- |
-| `EnvKeyResolver` | Reads `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` (overridable). Native only. |
+| `EnvKeyResolver` | Reads `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `DEEPSEEK_API_KEY` (overridable). Native only. Pass `lookup:` to read them from somewhere else, e.g. a desktop app parsing the user's shell profile. |
 | `MapKeyResolver` | Tests, or apps that already hold keys in a map. |
 | `FileKeyResolver.fromFile(path)` | Parses `.env`-style files (`KEY=value`) or loose `claude: …` / `openai key: …` lines. |
 | `ChainedKeyResolver([…])` | Tries each layer in order, returns the first non-empty hit. |

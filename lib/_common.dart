@@ -16,13 +16,25 @@
 // here so individual sources don't repeat the same imports.
 
 export 'dart:async'
-    show Completer, StreamController, StreamSubscription, TimeoutException;
+    show
+        Completer,
+        StreamController,
+        StreamSubscription,
+        Timer,
+        TimeoutException;
 export 'dart:convert' show jsonDecode, jsonEncode, utf8, LineSplitter;
 // `Platform` is only read on native paths (EnvKeyResolver, the CLI).
 export 'dart:io' show Platform;
 
 export 'package:http/http.dart'
-    show Client, ClientException, Request, Response, StreamedResponse;
+    show
+        AbortableRequest,
+        Client,
+        ClientException,
+        Request,
+        RequestAbortedException,
+        Response,
+        StreamedResponse;
 export 'package:meta/meta.dart' show immutable, protected, visibleForTesting;
 
 export 'src/_src.dart';
