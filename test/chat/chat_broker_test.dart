@@ -33,6 +33,7 @@ class _CapturingChat extends ChatBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) async {
     captured = request;
     return const AiCompletion(
@@ -49,6 +50,7 @@ class _CapturingChat extends ChatBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) =>
       const Stream<String>.empty();
 
@@ -57,6 +59,7 @@ class _CapturingChat extends ChatBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) =>
       StreamedCompletion.fromDeltas(
         deltas: stream(apiKey: apiKey, model: model, request: request),
@@ -82,6 +85,7 @@ class _PlainChat extends ChatBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) async =>
       const AiCompletion(text: 'hello world');
 
@@ -90,6 +94,7 @@ class _PlainChat extends ChatBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) async* {
     if (fail) throw const AiBrokerException('provider down');
     yield 'hello ';

@@ -12,6 +12,7 @@
 //.title~
 
 import '/_common.dart';
+import '../core/_abort.dart';
 
 /// Google Gemini (`generateContent` / `streamGenerateContent`).
 /// Pagination on listModels caps at 5 pages × 50; only `gemini-*` ids
@@ -100,21 +101,23 @@ class GeminiBroker extends ChatBroker implements EmbedBroker, KeyCheckBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) async {
     final uri = Uri.parse('$_baseUrl/models/$model:generateContent');
     final body = jsonEncode(buildPayload(request));
     final res = await retryRequest(
-      send: () => _http
-          .post(
-            uri,
-            headers: {
-              ..._authHeaders(apiKey),
-              'Content-Type': 'application/json',
-            },
-            body: body,
-          )
-          .timeout(_timeout),
+      send: () => postWithAbort(
+        _http,
+        uri,
+        headers: {
+          ..._authHeaders(apiKey),
+          'Content-Type': 'application/json',
+        },
+        body: body,
+        abortTrigger: abortTrigger,
+      ).timeout(_timeout),
       providerLabel: 'Gemini',
+      abortTrigger: abortTrigger,
     );
     final json = jsonDecode(res.body) as Map<String, Object?>;
     // Throws on an empty `candidates` array, which is a real failure at any
@@ -157,14 +160,21 @@ class GeminiBroker extends ChatBroker implements EmbedBroker, KeyCheckBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) =>
-      streamWithMeta(apiKey: apiKey, model: model, request: request).deltas;
+      streamWithMeta(
+        apiKey: apiKey,
+        model: model,
+        request: request,
+        abortTrigger: abortTrigger,
+      ).deltas;
 
   @override
   StreamedCompletion streamWithMeta({
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) {
     final completer = Completer<AiCompletion>();
     // A caller that only drains the text — every `stream()` call — already
@@ -177,6 +187,7 @@ class GeminiBroker extends ChatBroker implements EmbedBroker, KeyCheckBroker {
         model: model,
         request: request,
         completer: completer,
+        abortTrigger: abortTrigger,
       ),
       completion: completer.future,
     );
@@ -190,6 +201,7 @@ class GeminiBroker extends ChatBroker implements EmbedBroker, KeyCheckBroker {
     required String model,
     required ChatRequest request,
     required Completer<AiCompletion> completer,
+    Future<void>? abortTrigger,
   }) async* {
     final buf = StringBuffer();
     var servingModel = model;
@@ -242,6 +254,7 @@ class GeminiBroker extends ChatBroker implements EmbedBroker, KeyCheckBroker {
         body: body,
         providerLabel: 'Gemini',
         client: _http,
+        abortTrigger: abortTrigger,
       );
       // `yield*` rather than `await for`, so a consumer that cancels
       // mid-reply is acknowledged at once and the `finally` below still

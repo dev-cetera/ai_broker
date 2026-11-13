@@ -33,6 +33,7 @@ class _RecordingChat extends ChatBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) async {
     capturedModel = model;
     captured = request;
@@ -48,6 +49,7 @@ class _RecordingChat extends ChatBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) =>
       const Stream<String>.empty();
 
@@ -56,6 +58,7 @@ class _RecordingChat extends ChatBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) =>
       StreamedCompletion.fromDeltas(
         deltas: stream(apiKey: apiKey, model: model, request: request),

@@ -12,6 +12,7 @@
 //.title~
 
 import '/_common.dart';
+import '../core/_abort.dart';
 import '../core/_env.dart';
 
 /// Anthropic Claude (`/v1/messages`). `system` is a top-level field,
@@ -128,17 +129,19 @@ class AnthropicBroker extends ChatBroker implements KeyCheckBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) async {
     final body = jsonEncode(buildPayload(model, request, stream: false));
     final res = await retryRequest(
-      send: () => _http
-          .post(
-            Uri.parse('$baseUrl/messages'),
-            headers: _headers(apiKey),
-            body: body,
-          )
-          .timeout(_timeout),
+      send: () => postWithAbort(
+        _http,
+        Uri.parse('$baseUrl/messages'),
+        headers: _headers(apiKey),
+        body: body,
+        abortTrigger: abortTrigger,
+      ).timeout(_timeout),
       providerLabel: 'Anthropic',
+      abortTrigger: abortTrigger,
     );
     final json = jsonDecode(res.body) as Map<String, Object?>;
     final content = json['content'] as List<Object?>? ?? const [];
@@ -202,14 +205,21 @@ class AnthropicBroker extends ChatBroker implements KeyCheckBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) =>
-      streamWithMeta(apiKey: apiKey, model: model, request: request).deltas;
+      streamWithMeta(
+        apiKey: apiKey,
+        model: model,
+        request: request,
+        abortTrigger: abortTrigger,
+      ).deltas;
 
   @override
   StreamedCompletion streamWithMeta({
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) {
     final completer = Completer<AiCompletion>();
     // A caller that only drains the text — every `stream()` call — already
@@ -222,6 +232,7 @@ class AnthropicBroker extends ChatBroker implements KeyCheckBroker {
         model: model,
         request: request,
         completer: completer,
+        abortTrigger: abortTrigger,
       ),
       completion: completer.future,
     );
@@ -235,6 +246,7 @@ class AnthropicBroker extends ChatBroker implements KeyCheckBroker {
     required String model,
     required ChatRequest request,
     required Completer<AiCompletion> completer,
+    Future<void>? abortTrigger,
   }) async* {
     final buf = StringBuffer();
     var servingModel = model;
@@ -342,6 +354,7 @@ class AnthropicBroker extends ChatBroker implements KeyCheckBroker {
         body: body,
         providerLabel: 'Anthropic',
         client: _http,
+        abortTrigger: abortTrigger,
       );
       // `yield*` rather than `await for`, so a consumer that cancels
       // mid-reply is acknowledged at once and the `finally` below still
