@@ -13,163 +13,29 @@
 
 import '/_common.dart';
 
-/// OpenAI provider — implements [ChatBroker] (`/v1/chat/completions`)
-/// and [EmbedBroker] (`/v1/embeddings`). Filters [listModels] to
-/// `gpt-*` / `o<digit>*` so the picker doesn't show whisper /
-/// embeddings / dall-e.
-class OpenAiBroker extends ChatBroker implements EmbedBroker {
+/// OpenAI provider — implements [ChatBroker] (`/v1/chat/completions`),
+/// [EmbedBroker] (`/v1/embeddings`) and [KeyCheckBroker]. A preset of
+/// [OpenAiCompatibleBroker]. Filters [listModels] to `gpt-*` / `o<digit>*`
+/// so the picker doesn't show whisper / embeddings / dall-e.
+///
+/// The token ceiling is sent as `max_completion_tokens` (`max_tokens` is
+/// deprecated and rejected by o-series models). Leave
+/// [ChatRequest.temperature] unset for reasoning models, and use
+/// [ChatRequest.effort] (`reasoning_effort`) instead.
+class OpenAiBroker extends OpenAiCompatibleBroker implements EmbedBroker {
   /// Recommended default for [embed]. 1536-d, cheap, well-supported.
   static const defaultEmbedModel = 'text-embedding-3-small';
 
-  static const _baseUrl = 'https://api.openai.com/v1';
-  static const _timeout = Duration(seconds: 30);
   static final _chatModelPattern = RegExp(r'^(gpt-|o\d)');
 
-  final Client _http;
-
-  OpenAiBroker({Client? client}) : _http = client ?? Client();
-
-  @override
-  String get id => 'openai';
-
-  @override
-  String get label => 'OpenAI';
-
-  @override
-  Future<List<String>> listModels(String apiKey) async {
-    if (apiKey.isEmpty) return const [];
-    final res = await _http.get(
-      Uri.parse('$_baseUrl/models'),
-      headers: {'Authorization': 'Bearer $apiKey'},
-    ).timeout(_timeout);
-    if (res.statusCode >= 400) return const [];
-    final body = jsonDecode(res.body) as Map<String, Object?>;
-    final data = body['data'] as List<Object?>? ?? const [];
-    final ids = <String>[];
-    for (final m in data) {
-      if (m is! Map<String, Object?>) continue;
-      final modelId = m['id'] as String?;
-      if (modelId == null) continue;
-      if (!_chatModelPattern.hasMatch(modelId)) continue;
-      ids.add(modelId);
-    }
-    ids.sort();
-    return ids;
-  }
-
-  @override
-  Future<AiCompletion> chatWithMeta({
-    required String apiKey,
-    required String model,
-    required ChatRequest request,
-  }) async {
-    final body = jsonEncode(_buildPayload(model, request, stream: false));
-    final res = await retryRequest(
-      send: () => _http
-          .post(
-            Uri.parse('$_baseUrl/chat/completions'),
-            headers: {
-              'Authorization': 'Bearer $apiKey',
-              'Content-Type': 'application/json',
-            },
-            body: body,
-          )
-          .timeout(_timeout),
-      providerLabel: 'OpenAI',
-      isHardFailure: (r) =>
-          r.statusCode == 429 && r.body.toLowerCase().contains('quota'),
-    );
-    final json = jsonDecode(res.body) as Map<String, Object?>;
-    final choices = json['choices'] as List<Object?>?;
-    if (choices == null || choices.isEmpty) {
-      throw const AiBrokerException('OpenAI returned no choices.');
-    }
-    final first = choices.first as Map<String, Object?>;
-    final message = first['message'] as Map<String, Object?>?;
-    final content = message?['content'] as String?;
-    final rawFinishReason = first['finish_reason'] as String?;
-    if (content == null || content.isEmpty) {
-      throw AiBrokerException(
-        rawFinishReason == null
-            ? 'OpenAI returned empty content.'
-            : 'OpenAI returned empty content '
-                '(finish_reason: $rawFinishReason).',
-      );
-    }
-    final usage = json['usage'] as Map<String, Object?>?;
-    final details =
-        usage?['completion_tokens_details'] as Map<String, Object?>?;
-    return AiCompletion(
-      text: content.trim(),
-      rawFinishReason: rawFinishReason,
-      finishReason:
-          rawFinishReason == null ? null : _finishReasonOf(rawFinishReason),
-      inputTokens: usage?['prompt_tokens'] as int?,
-      outputTokens: usage?['completion_tokens'] as int?,
-      thinkingTokens: details?['reasoning_tokens'] as int?,
-    );
-  }
-
-  /// Maps OpenAI's `finish_reason` onto [AiFinishReason]. Returns `null`
-  /// for a value this package does not know; the raw string is still
-  /// carried on [AiCompletion.rawFinishReason].
-  static AiFinishReason? _finishReasonOf(String raw) => switch (raw) {
-        'stop' => AiFinishReason.stop,
-        'length' => AiFinishReason.maxTokens,
-        'content_filter' => AiFinishReason.safety,
-        'tool_calls' || 'function_call' => AiFinishReason.toolUse,
-        // Unmapped on purpose: anything newer than this package.
-        _ => null,
-      };
-
-  @override
-  Stream<String> stream({
-    required String apiKey,
-    required String model,
-    required ChatRequest request,
-  }) async* {
-    final body = jsonEncode(_buildPayload(model, request, stream: true));
-    final byteStream = await openSsePost(
-      uri: Uri.parse('$_baseUrl/chat/completions'),
-      headers: {
-        'Authorization': 'Bearer $apiKey',
-        'Content-Type': 'application/json',
-        'Accept': 'text/event-stream',
-      },
-      body: body,
-      providerLabel: 'OpenAI',
-      client: _http,
-    );
-    await for (final event in decodeSseStream(byteStream)) {
-      final data = event.data;
-      if (data == '[DONE]') return;
-      if (data.isEmpty) continue;
-      final json = jsonDecode(data) as Map<String, Object?>;
-      final choices = json['choices'] as List<Object?>? ?? const [];
-      if (choices.isEmpty) continue;
-      final delta = (choices.first as Map<String, Object?>)['delta']
-          as Map<String, Object?>?;
-      final content = delta?['content'] as String?;
-      if (content != null && content.isNotEmpty) yield content;
-    }
-  }
-
-  Map<String, Object?> _buildPayload(
-    String model,
-    ChatRequest req, {
-    required bool stream,
-  }) =>
-      {
-        'model': model,
-        'messages': [
-          if (req.system.isNotEmpty) {'role': 'system', 'content': req.system},
-          for (final m in req.messages)
-            {'role': m.roleName, 'content': m.content},
-        ],
-        'temperature': req.temperature,
-        'max_tokens': req.maxTokens,
-        if (stream) 'stream': true,
-      };
+  OpenAiBroker({super.client, String? baseUrl})
+      : super(
+          id: 'openai',
+          label: 'OpenAI',
+          baseUrl: baseUrl ?? 'https://api.openai.com/v1',
+          modelFilter: _chatModelPattern.hasMatch,
+          maxTokensField: 'max_completion_tokens',
+        );
 
   @override
   Future<List<List<double>>> embed({
@@ -184,16 +50,16 @@ class OpenAiBroker extends ChatBroker implements EmbedBroker {
       'encoding_format': 'float',
     });
     final res = await retryRequest(
-      send: () => _http
+      send: () => httpClient
           .post(
-            Uri.parse('$_baseUrl/embeddings'),
+            Uri.parse('$baseUrl/embeddings'),
             headers: {
-              'Authorization': 'Bearer $apiKey',
+              ...authHeaders(apiKey),
               'Content-Type': 'application/json',
             },
             body: body,
           )
-          .timeout(_timeout),
+          .timeout(timeout),
       providerLabel: 'OpenAI',
       isHardFailure: (r) =>
           r.statusCode == 429 && r.body.toLowerCase().contains('quota'),

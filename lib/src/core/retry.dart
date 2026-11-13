@@ -122,14 +122,37 @@ Duration? _retryAfter(Response res) {
   if (seconds != null) {
     return seconds < 0 ? null : Duration(seconds: seconds);
   }
-  final DateTime date;
-  try {
-    date = HttpDate.parse(value);
-  } on HttpException {
-    return null;
-  }
+  final date = parseHttpDate(value);
+  if (date == null) return null;
   final untilThen = date.difference(DateTime.now().toUtc());
   return untilThen.isNegative ? Duration.zero : untilThen;
+}
+
+const _months = [
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', //
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+];
+
+final _imfFixdate = RegExp(
+  r'^[A-Za-z]{3}, (\d{2}) ([A-Za-z]{3}) (\d{4}) (\d{2}):(\d{2}):(\d{2}) GMT$',
+);
+
+/// Parses an HTTP-date in the IMF-fixdate form every current server sends
+/// (`Sun, 06 Nov 1994 08:49:37 GMT`, RFC 9110 §5.6.7), as UTC. Returns
+/// `null` for anything else, including the obsolete RFC 850 and asctime
+/// forms. Pure Dart, so it works on the web, where `dart:io`'s `HttpDate`
+/// is unavailable.
+@visibleForTesting
+DateTime? parseHttpDate(String value) {
+  final m = _imfFixdate.firstMatch(value.trim());
+  if (m == null) return null;
+  final month = _months.indexOf(m.group(2)!) + 1;
+  if (month == 0) return null;
+  int at(int group) => int.parse(m.group(group)!);
+  final date = DateTime.utc(at(3), month, at(1), at(4), at(5), at(6));
+  // DateTime normalises overflow (31 Feb → 3 Mar); reject it instead.
+  if (date.day != at(1) || date.month != month) return null;
+  return date;
 }
 
 /// Pulls an `error.message` string out of a provider's JSON error

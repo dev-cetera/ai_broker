@@ -42,6 +42,7 @@ abstract class KeyResolver {
 ///  - `openai`    → `OPENAI_API_KEY`
 ///  - `anthropic` → `ANTHROPIC_API_KEY`
 ///  - `gemini`    → `GEMINI_API_KEY`
+///  - `deepseek`  → `DEEPSEEK_API_KEY`
 ///
 /// Override individual mappings via the constructor when an
 /// environment uses a different name (e.g. `GOOGLE_API_KEY`).
@@ -54,6 +55,7 @@ class EnvKeyResolver extends KeyResolver {
           'anthropic': 'ANTHROPIC_API_KEY',
           'gemini': 'GEMINI_API_KEY',
           'google_translate': 'GOOGLE_TRANSLATE_API_KEY',
+          'deepseek': 'DEEPSEEK_API_KEY',
           ...?overrides,
         };
 
@@ -86,6 +88,7 @@ class MapKeyResolver extends KeyResolver {
 /// claude: sk-ant-...          # alias for 'anthropic'
 /// openai key: sk-...          # alias for 'openai'
 /// gemini: AIza...
+/// deepseek: sk-...
 /// OPENAI_API_KEY=sk-...       # env-var style also works
 /// ```
 ///
@@ -97,6 +100,7 @@ class MapKeyResolver extends KeyResolver {
 /// | `openai`                    | `openai`    |
 /// | `anthropic`, `claude`       | `anthropic` |
 /// | `gemini`, `google`          | `gemini`    |
+/// | `deepseek`                  | `deepseek`  |
 ///
 /// Unrecognised lines are silently skipped (so e.g. `notes: rotate Friday`
 /// doesn't break parsing).
@@ -161,6 +165,8 @@ class FileKeyResolver extends KeyResolver {
         return 'anthropic';
       case 'gemini':
         return 'gemini';
+      case 'deepseek':
+        return 'deepseek';
       case 'google_translate':
       case 'google translate':
       case 'googletranslate':
