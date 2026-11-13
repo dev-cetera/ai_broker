@@ -36,8 +36,9 @@ abstract class KeyResolver {
   }
 }
 
-/// Reads keys from `Platform.environment` using a per-broker env var
-/// name. Defaults follow the SDK conventions each provider documents:
+/// Reads keys from `Platform.environment` (or a `lookup` you supply) using a
+/// per-broker env var name. Defaults follow the SDK conventions each
+/// provider documents:
 ///
 ///  - `openai`    → `OPENAI_API_KEY`
 ///  - `anthropic` → `ANTHROPIC_API_KEY`
@@ -46,11 +47,24 @@ abstract class KeyResolver {
 ///
 /// Override individual mappings via the constructor when an
 /// environment uses a different name (e.g. `GOOGLE_API_KEY`).
+///
+/// Pass `lookup` to read the variables from somewhere other than the process
+/// environment. A desktop app launched from Finder, an IDE or `flutter run`
+/// doesn't inherit the user's shell exports, so it can hand in its own
+/// reader (for example one that parses `~/.zshenv`). An empty value counts as
+/// absent either way.
 class EnvKeyResolver extends KeyResolver {
   final Map<String, String> envVarNames;
 
-  EnvKeyResolver({Map<String, String>? overrides})
-      : envVarNames = {
+  /// Reads one variable by name; `null` means it is not set. Defaults to
+  /// `Platform.environment`.
+  final String? Function(String name)? _lookup;
+
+  EnvKeyResolver({
+    Map<String, String>? overrides,
+    String? Function(String name)? lookup,
+  })  : _lookup = lookup,
+        envVarNames = {
           'openai': 'OPENAI_API_KEY',
           'anthropic': 'ANTHROPIC_API_KEY',
           'gemini': 'GEMINI_API_KEY',
@@ -63,7 +77,8 @@ class EnvKeyResolver extends KeyResolver {
   Future<String?> resolve(String brokerId) async {
     final name = envVarNames[brokerId];
     if (name == null) return null;
-    final value = Platform.environment[name];
+    final lookup = _lookup;
+    final value = lookup == null ? Platform.environment[name] : lookup(name);
     if (value == null || value.isEmpty) return null;
     return value;
   }

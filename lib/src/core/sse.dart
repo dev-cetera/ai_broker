@@ -12,6 +12,7 @@
 //.title~
 
 import '/_common.dart';
+import '_abort.dart';
 
 /// One parsed Server-Sent Event. OpenAI and Anthropic both use SSE for
 /// their streaming endpoints (Gemini uses a JSON-array stream — see
@@ -74,28 +75,45 @@ Stream<SseEvent> decodeSseStream(Stream<List<int>> source) async* {
 /// initial connect throws — so the caller never has to manage it.
 /// Passing [client] keeps the lifecycle with the caller (every broker
 /// in this package reuses its own long-lived client this way).
+///
+/// When [abortTrigger] completes, the request is aborted: before the
+/// response arrives this throws [AiAbortedException]; while the body is
+/// streaming, the returned stream emits [AiAbortedException] and closes, and
+/// the underlying response is cancelled so the connection is released. A
+/// trigger that has already completed throws before anything is sent.
 Future<Stream<List<int>>> openSsePost({
   required Uri uri,
   required Map<String, String> headers,
   required String body,
   required String providerLabel,
   Client? client,
+  Future<void>? abortTrigger,
 }) async {
+  final guard = AbortGuard(abortTrigger);
+  if (abortTrigger != null) await guard.throwIfFired();
   final ownsClient = client == null;
   final http = client ?? Client();
   StreamedResponse streamed;
   try {
-    final req = Request('POST', uri);
+    final req = abortTrigger == null
+        ? Request('POST', uri)
+        : AbortableRequest('POST', uri, abortTrigger: abortTrigger);
     req.headers.addAll(headers);
     req.body = body;
-    streamed = await http.send(req);
+    streamed = await guard.race(
+      http.send(req),
+      // A response that lands after the abort is never read; cancel it so a
+      // client that ignored the trigger still lets go of the connection.
+      discard: (late) =>
+          late.stream.listen(null, onError: (Object _) {}).cancel(),
+    );
   } catch (_) {
     if (ownsClient) http.close();
     rethrow;
   }
   if (streamed.statusCode < 200 || streamed.statusCode >= 300) {
     try {
-      final buffered = await streamed.stream.bytesToString();
+      final buffered = await guard.race(streamed.stream.bytesToString());
       throw AiBrokerException(
         '$providerLabel ${streamed.statusCode}: $buffered',
         statusCode: streamed.statusCode,
@@ -104,29 +122,44 @@ Future<Stream<List<int>>> openSsePost({
       if (ownsClient) http.close();
     }
   }
-  if (!ownsClient) return streamed.stream;
+  if (!ownsClient && abortTrigger == null) return streamed.stream;
   // Wrap the byte stream so the ephemeral client is released exactly
-  // once — whether the consumer drains, cancels, or hits an error.
+  // once — whether the consumer drains, cancels, or hits an error — and so
+  // an abort ends it with [AiAbortedException] even when the client does
+  // not honour the trigger itself.
   final controller = StreamController<List<int>>(sync: true);
   late StreamSubscription<List<int>> sub;
   var closed = false;
   void closeOnce() {
     if (closed) return;
     closed = true;
-    http.close();
+    if (ownsClient) http.close();
+  }
+
+  void abort() {
+    if (controller.isClosed) return;
+    controller.addError(const AiAbortedException(), StackTrace.current);
+    sub.cancel().ignore();
+    closeOnce();
+    controller.close().ignore();
   }
 
   sub = streamed.stream.listen(
-    controller.add,
+    (chunk) {
+      if (!controller.isClosed) controller.add(chunk);
+    },
     onError: (Object e, StackTrace s) {
-      controller.addError(e, s);
+      // The client honouring the trigger: report it the same way as ours.
+      if (e is RequestAbortedException) return abort();
+      if (!controller.isClosed) controller.addError(e, s);
     },
     onDone: () {
       closeOnce();
-      controller.close();
+      if (!controller.isClosed) controller.close();
     },
     cancelOnError: false,
   );
+  guard.onAbort(abort);
   controller
     ..onCancel = () async {
       await sub.cancel();

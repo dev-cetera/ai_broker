@@ -73,6 +73,44 @@ void main() {
       final r = EnvKeyResolver();
       expect(await r.resolve('not-a-real-broker'), isNull);
     });
+
+    test('reads the process environment by default', () async {
+      // PATH is set in every environment the tests run in.
+      final r = EnvKeyResolver(overrides: {'custom': 'PATH'});
+      expect(await r.resolve('custom'), Platform.environment['PATH']);
+    });
+
+    test('lookup replaces the process environment', () async {
+      final asked = <String>[];
+      final r = EnvKeyResolver(
+        overrides: {'custom': 'PATH'},
+        lookup: (name) {
+          asked.add(name);
+          return name == 'ANTHROPIC_API_KEY' ? 'sk-ant-from-file' : null;
+        },
+      );
+      expect(await r.resolve('anthropic'), 'sk-ant-from-file');
+      // Set in the process environment, but the lookup is all that's read.
+      expect(await r.resolve('custom'), isNull);
+      expect(asked, ['ANTHROPIC_API_KEY', 'PATH']);
+    });
+
+    test('lookup is asked for the overridden variable name', () async {
+      final r = EnvKeyResolver(
+        overrides: {'gemini': 'GOOGLE_API_KEY'},
+        lookup: (name) => {'GOOGLE_API_KEY': 'g-key'}[name],
+      );
+      expect(await r.resolve('gemini'), 'g-key');
+    });
+
+    test('an empty value from lookup counts as absent', () async {
+      final r = EnvKeyResolver(lookup: (_) => '');
+      expect(await r.resolve('openai'), isNull);
+      await expectLater(
+        r.require('openai'),
+        throwsA(isA<MissingKeyException>()),
+      );
+    });
   });
 
   group('MissingKeyException', () {

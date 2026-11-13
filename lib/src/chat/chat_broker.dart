@@ -22,6 +22,16 @@ import '/_common.dart';
 /// [completeWithMeta] and [streamWithMeta] are defaults, so a class that
 /// `extends ChatBroker` gets them for free. A class that
 /// `implements ChatBroker` must supply all of them.
+///
+/// **Cancelling.** Every request method takes an optional `abortTrigger`.
+/// When that future completes, the in-flight HTTP request is aborted (the
+/// connection is closed, so the provider stops generating) and the call
+/// throws [AiAbortedException]; a stream emits it as an error and closes,
+/// and [StreamedCompletion.completion] fails with it. A trigger that has
+/// already completed throws before anything is sent, and an aborted request
+/// is never retried. The trigger must not complete with an error. Leave it
+/// `null` and nothing changes. An implementation of [chatWithMeta] or
+/// [stream] must honour it; the defaults here only pass it along.
 abstract class ChatBroker implements AiBroker {
   /// Single-shot. Returns the assistant's raw text. Same call as
   /// [completeWithMeta], keeping only [AiCompletion.text].
@@ -32,6 +42,7 @@ abstract class ChatBroker implements AiBroker {
     required String user,
     double? temperature,
     int maxTokens = 2048,
+    Future<void>? abortTrigger,
   }) =>
       chat(
         apiKey: apiKey,
@@ -42,6 +53,7 @@ abstract class ChatBroker implements AiBroker {
           temperature: temperature,
           maxTokens: maxTokens,
         ),
+        abortTrigger: abortTrigger,
       );
 
   /// Single-shot, returning the reply with why the model stopped and the
@@ -54,6 +66,7 @@ abstract class ChatBroker implements AiBroker {
     required String user,
     double? temperature,
     int maxTokens = 2048,
+    Future<void>? abortTrigger,
   }) =>
       chatWithMeta(
         apiKey: apiKey,
@@ -64,6 +77,7 @@ abstract class ChatBroker implements AiBroker {
           temperature: temperature,
           maxTokens: maxTokens,
         ),
+        abortTrigger: abortTrigger,
       );
 
   /// Multi-turn. Returns the assistant's raw text for the final turn.
@@ -76,11 +90,13 @@ abstract class ChatBroker implements AiBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) async {
     final result = await chatWithMeta(
       apiKey: apiKey,
       model: model,
       request: request,
+      abortTrigger: abortTrigger,
     );
     if (result.text.isEmpty) {
       final reason = result.rawFinishReason;
@@ -122,6 +138,7 @@ abstract class ChatBroker implements AiBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   });
 
   /// Token-streaming chat. Each event is an *incremental* delta —
@@ -132,6 +149,7 @@ abstract class ChatBroker implements AiBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   });
 
   /// Like [stream], but also reports what the turn cost and why it ended.
@@ -153,9 +171,15 @@ abstract class ChatBroker implements AiBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) =>
       StreamedCompletion.fromDeltas(
-        deltas: stream(apiKey: apiKey, model: model, request: request),
+        deltas: stream(
+          apiKey: apiKey,
+          model: model,
+          request: request,
+          abortTrigger: abortTrigger,
+        ),
         model: model,
       );
 }

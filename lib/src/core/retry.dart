@@ -12,6 +12,7 @@
 //.title~
 
 import '/_common.dart';
+import '_abort.dart';
 
 /// Status codes that mean "try again later, the request itself is
 /// fine": rate limits (429), transient server errors (500, 502, 504) and
@@ -44,6 +45,12 @@ const retryableStatusCodes = {429, 500, 502, 503, 504, 529};
 /// which provider failed (`'OpenAI 429: ...'`).
 ///
 /// [wait] performs the pause between attempts; tests pass a recorder.
+///
+/// When [abortTrigger] completes, the call throws [AiAbortedException] at
+/// once — during an attempt or during the pause between two — and nothing is
+/// retried. [send] should pass the same trigger to its request so the
+/// connection is closed too. A trigger that has already completed when the
+/// call starts throws before [send] runs at all.
 Future<Response> retryRequest({
   required Future<Response> Function() send,
   required String providerLabel,
@@ -52,16 +59,30 @@ Future<Response> retryRequest({
   Duration maxRetryAfter = const Duration(seconds: 60),
   bool Function(Response)? isHardFailure,
   Future<void> Function(Duration) wait = _sleep,
+  Future<void>? abortTrigger,
 }) async {
+  final guard = AbortGuard(abortTrigger);
+  if (abortTrigger != null) await guard.throwIfFired();
+  // The default sleep becomes a timer the trigger cancels; a caller's own
+  // [wait] can only be raced.
+  Future<void> pause(Duration duration) => identical(wait, _sleep)
+      ? guard.sleep(duration)
+      : guard.race(wait(duration));
   for (var attempt = 0; attempt < maxAttempts; attempt++) {
+    if (guard.fired) throw const AiAbortedException();
     final isLastAttempt = attempt == maxAttempts - 1;
     final backoff = baseDelay * (1 << attempt);
     final Response res;
     try {
-      res = await send();
+      res = await guard.race(send());
+    } on RequestAbortedException {
+      // A `ClientException` subtype, so it has to be caught before the retry
+      // branch below: an abort is never retried.
+      throw const AiAbortedException();
     } on ClientException catch (e) {
+      if (guard.fired) throw const AiAbortedException();
       if (isLastAttempt) throw _networkFailure(providerLabel, maxAttempts, e);
-      await wait(backoff);
+      await pause(backoff);
       continue;
     }
     if (res.statusCode >= 200 && res.statusCode < 300) return res;
@@ -82,7 +103,7 @@ Future<Response> retryRequest({
         );
       }
       final retryAfter = _retryAfter(res);
-      await wait(
+      await pause(
         retryAfter == null
             ? backoff
             : (retryAfter > maxRetryAfter ? maxRetryAfter : retryAfter),

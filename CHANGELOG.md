@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.0]
+
+- breaking: every request method on `ChatBroker` (`complete`, `completeWithMeta`, `chat`, `chatWithMeta`, `stream`, `streamWithMeta`) takes an optional `Future<void>? abortTrigger`. A class that overrides `chatWithMeta`, `stream` or `streamWithMeta` has to add the parameter to its override.
+- feat: cancellation. Completing `abortTrigger` aborts the in-flight HTTP request (the connection is closed, so the provider stops generating) and the call throws the new `AiAbortedException`, an `AiBrokerException`. Streams end with it as an error and `StreamedCompletion.completion` fails with it. A trigger that has already completed throws before anything is sent. Leaving it `null` changes nothing.
+- feat: `retryRequest(abortTrigger:)` never retries an aborted request and stops waiting mid-backoff when the trigger fires; `openSsePost(abortTrigger:)` does the same for streams.
+- feat: `EnvKeyResolver(lookup:)` reads variables through your own function instead of `Platform.environment`, for desktop apps that don't inherit the user's shell exports. An empty value still counts as absent.
+- chore: requires `http` ^1.5.0, the first version with abortable requests.
+
 ## [0.8.0]
 
 - breaking: `ChatRequest.temperature` is now `double?` (default `null`, was `0.3`) and is sent only when set; current Claude and OpenAI reasoning models reject it. `complete` / `completeWithMeta` take `double? temperature`.

@@ -12,6 +12,7 @@
 //.title~
 
 import '/_common.dart';
+import '../core/_abort.dart';
 
 /// Any provider that speaks the OpenAI Chat Completions API
 /// (`POST {baseUrl}/chat/completions`, `GET {baseUrl}/models`, bearer-token
@@ -141,22 +142,24 @@ class OpenAiCompatibleBroker extends ChatBroker implements KeyCheckBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) async {
     final body = jsonEncode(buildPayload(model, request, stream: false));
     final res = await retryRequest(
-      send: () => httpClient
-          .post(
-            Uri.parse('$baseUrl/chat/completions'),
-            headers: {
-              ...authHeaders(apiKey),
-              'Content-Type': 'application/json',
-            },
-            body: body,
-          )
-          .timeout(timeout),
+      send: () => postWithAbort(
+        httpClient,
+        Uri.parse('$baseUrl/chat/completions'),
+        headers: {
+          ...authHeaders(apiKey),
+          'Content-Type': 'application/json',
+        },
+        body: body,
+        abortTrigger: abortTrigger,
+      ).timeout(timeout),
       providerLabel: label,
       isHardFailure: (r) =>
           r.statusCode == 429 && r.body.toLowerCase().contains('quota'),
+      abortTrigger: abortTrigger,
     );
     final json = jsonDecode(res.body) as Map<String, Object?>;
     final choices = json['choices'] as List<Object?>?;
@@ -190,14 +193,21 @@ class OpenAiCompatibleBroker extends ChatBroker implements KeyCheckBroker {
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) =>
-      streamWithMeta(apiKey: apiKey, model: model, request: request).deltas;
+      streamWithMeta(
+        apiKey: apiKey,
+        model: model,
+        request: request,
+        abortTrigger: abortTrigger,
+      ).deltas;
 
   @override
   StreamedCompletion streamWithMeta({
     required String apiKey,
     required String model,
     required ChatRequest request,
+    Future<void>? abortTrigger,
   }) {
     final completer = Completer<AiCompletion>();
     // A caller that only drains the text — every `stream()` call — already
@@ -210,6 +220,7 @@ class OpenAiCompatibleBroker extends ChatBroker implements KeyCheckBroker {
         model: model,
         request: request,
         completer: completer,
+        abortTrigger: abortTrigger,
       ),
       completion: completer.future,
     );
@@ -227,6 +238,7 @@ class OpenAiCompatibleBroker extends ChatBroker implements KeyCheckBroker {
     required String model,
     required ChatRequest request,
     required Completer<AiCompletion> completer,
+    Future<void>? abortTrigger,
   }) async* {
     final buf = StringBuffer();
     var servingModel = model;
@@ -249,6 +261,7 @@ class OpenAiCompatibleBroker extends ChatBroker implements KeyCheckBroker {
         body: body,
         providerLabel: label,
         client: httpClient,
+        abortTrigger: abortTrigger,
       );
 
       Iterable<String> consume(SseEvent event) sync* {
